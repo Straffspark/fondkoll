@@ -297,7 +297,7 @@
 
   function viewRapport() {
     var r = currentReport();
-    if (!r) return '<h2>Månadsrapport</h2><p>Rapporten bygger på dina köp. Registrera det första köpet så räknas utvecklingen fram varje köpdag.</p><button class="knapp" data-go="kop">Registrera köp</button>';
+    if (!r) return state.purchases.length ? '<h2>Månadsrapport</h2><p>Dina innehav lades in i dag. Den första rapporten kommer i morgon och sedan varje köpdag, när det finns en utveckling att redovisa.</p>' : '<h2>Månadsrapport</h2><p>Rapporten bygger på dina köp. Registrera det första köpet så räknas utvecklingen fram varje köpdag.</p><button class="knapp" data-go="kop">Registrera köp</button>';
     var rep = r.rep, h = '<h2>Månadsrapport</h2>';
     h += '<label for="r-period" class="ejtryck">Period</label><select id="r-period" class="ejtryck">' + r.periods.map(function (p, i) {
       return '<option value="' + i + '"' + (i === repIdx ? ' selected' : '') + '>' + esc(periodLabel(p)) + '</option>'; }).join('') + '</select>';

@@ -171,7 +171,7 @@
     var v = (x * 100).toFixed(dec == null ? 1 : dec).replace('.', ',').replace('-', '−');
     return (x > 0 ? '+' : '') + v + ' %';
   }
-  function fmtSignedKr(n) { return (n > 0 ? '+' : n < 0 ? '−' : '') + fmtKr(Math.abs(n)); }
+  function fmtSignedKr(n) { n = Math.round(n) || 0; return (n > 0 ? '+' : n < 0 ? '−' : '') + fmtKr(Math.abs(n)); }
 
   /* Löpande text om periodens utveckling per tillgångsslag. */
   function analysis(report) {
