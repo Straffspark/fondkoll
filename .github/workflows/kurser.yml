@@ -2,8 +2,8 @@ name: Hämta kurser
 
 on:
   schedule:
-    - cron: '30 17 * * 1-5'   # vardagar efter börsens stängning (UTC)
-    - cron: '0 6 25 * *'      # extra körning på köpdagen
+    - cron: '30 17 * * *'   # varje dag efter börsens stängning (UTC)
+    - cron: '15 6 * * *'    # varje morgon, för fondkurser som publiceras sent
   workflow_dispatch:
 
 permissions:

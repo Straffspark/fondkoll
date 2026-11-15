@@ -316,6 +316,48 @@
     return changed;
   }
 
+  /* Första kända kurs från och med `date` (automatisk eller manuell). */
+  function firstPriceFrom(state, prices, hid, date) {
+    var best = null;
+    var s = prices && prices.series && prices.series[hid];
+    if (s && s.points) {
+      for (var i = 0; i < s.points.length; i++) { if (s.points[i][0] >= date) { best = { price: s.points[i][1], date: s.points[i][0], source: 'auto' }; break; } }
+    }
+    var man = state.manualPrices && state.manualPrices[hid];
+    if (man) for (var d in man) if (d >= date && (!best || d < best.date)) best = { price: man[d], date: d, source: 'manuell' };
+    return best;
+  }
+
+  /* Månadssparandets köp som ska registreras: ett per spardag sedan planen började gälla.
+     Köpet görs till första kurs från och med spardagen. Saknas den väntar köpet, högst en vecka. */
+  function planDue(state, prices, today) {
+    var plan = state.plan, out = [], waiting = null;
+    var amount = +((state.settings || {}).monthlyAmount) || 0, day = +((state.settings || {}).buyDay) || 25;
+    if (!plan || plan.auto === false || !plan.since || !(amount > 0) || !plan.alloc) return { purchases: out, waiting: null };
+    var ids = (state.holdings || []).map(function (h) { return h.id; }).filter(function (id) { return +plan.alloc[id] > 0; });
+    var sum = ids.reduce(function (a, id) { return a + +plan.alloc[id]; }, 0);
+    if (!ids.length || Math.abs(sum - 100) > 0.5) return { purchases: out, waiting: null };
+    var skipped = plan.skipped || [], d = nextBuyDay(plan.since, day), guard = 0;
+    while (d <= today && guard++ < 240) {
+      var taken = skipped.indexOf(d) >= 0 || (state.purchases || []).some(function (p) { return p.planDate === d || (!p.opening && p.date === d); });
+      if (!taken) {
+        var lines = [], ok = true;
+        for (var i = 0; i < ids.length; i++) {
+          var pr = firstPriceFrom(state, prices, ids[i], d);
+          if (pr && daysBetween(d, pr.date) > 7) pr = null;
+          if (!pr && daysBetween(d, today) > 7) pr = priceOn(state, prices, ids[i], today);
+          if (!pr || !(pr.price > 0)) { ok = false; break; }
+          var a = Math.round(amount * plan.alloc[ids[i]] / sum * 100) / 100;
+          lines.push({ hid: ids[i], amount: a, price: pr.price, units: a / pr.price });
+        }
+        if (!ok) { waiting = d; break; }
+        out.push({ id: 'plan-' + d, date: d, planDate: d, auto: true, lines: lines });
+      }
+      d = followingBuyDay(d, day);
+    }
+    return { purchases: out, waiting: waiting };
+  }
+
   function firstPurchaseDate(state) {
     var f = null;
     (state.purchases || []).forEach(function (p) { if (!f || p.date < f) f = p.date; });
@@ -340,7 +382,7 @@
     return out.reverse();
   }
 
-  var api = { TYPES: TYPES, TYPE_ORDER: TYPE_ORDER, lastBuyDay: lastBuyDay, nextBuyDay: nextBuyDay, prevBuyDay: prevBuyDay,
+  var api = { planDue: planDue, firstPriceFrom: firstPriceFrom, TYPES: TYPES, TYPE_ORDER: TYPE_ORDER, lastBuyDay: lastBuyDay, nextBuyDay: nextBuyDay, prevBuyDay: prevBuyDay,
     followingBuyDay: followingBuyDay, daysBetween: daysBetween, priceOn: priceOn, snapshot: snapshot, targets: targets,
     periodReport: periodReport, suggestBuy: suggestBuy, typeShares: typeShares, analysis: analysis,
     recommendations: recommendations, history: history, resolveOpening: resolveOpening, reportPeriods: reportPeriods, firstPurchaseDate: firstPurchaseDate,

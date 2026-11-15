@@ -105,6 +105,10 @@ td input[type=number] { width: 84px; padding: 6px; min-height: 38px; text-align:
 .koprad .falt label, .koprad .etik { display: block; font-size: 14px; color: var(--muted); margin: 8px 0 3px; }
 .koprad strong { display: block; min-height: 44px; line-height: 44px; white-space: nowrap; text-align: right; }
 .koprad p { margin: 6px 0 0; }
+details.hand { margin-top: 36px; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); padding: 4px 0; }
+details.hand summary { font-size: 18px; font-weight: 600; padding: 12px 0; cursor: pointer; }
+.kryss { display: flex; gap: 10px; align-items: flex-start; color: var(--ink); font-size: 16px; margin: 12px 0 4px; }
+.kryss input { width: 22px; height: 22px; margin-top: 2px; accent-color: var(--spruce); flex: none; }
 .forslag { list-style: none; padding: 0; margin: 0; }
 .forslag li { padding: 12px 0 12px 14px; border-left: 4px solid var(--line); margin: 10px 0; }
 .forslag li.gor { border-color: var(--amber); }

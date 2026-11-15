@@ -99,4 +99,36 @@ assert.equal(ro.total.buys, 0); assert.equal(ro.total.open, 1000); assert.equal(
 assert.ok(Math.abs(ro.total.pct + 0.10) < 1e-9);
 assert.ok(/befintliga innehav/.test(F.analysis(ro)[0]));
 assert.equal(F.TYPE_ORDER.length, 4);
+
+// Månadssparande: automatiska köp
+{
+  const pr = { series: {
+    r: { points: [['2027-01-22', 100], ['2027-01-25', 101], ['2027-02-25', 102], ['2027-03-24', 103]] },
+    a: { points: [['2027-01-22', 200], ['2027-01-26', 202], ['2027-02-25', 204], ['2027-03-24', 206]] },
+    x: { points: [['2027-01-25', 50]] } } };
+  const st = { settings: { monthlyAmount: 4000, buyDay: 25 }, manualPrices: {}, purchases: [],
+    holdings: [{ id: 'r', name: 'R', type: 'ranta', target: 50 }, { id: 'a', name: 'A', type: 'aktiefond', target: 50 }, { id: 'x', name: 'X', type: 'aktie', target: 0 }],
+    plan: { alloc: { r: 75, a: 25 }, auto: true, since: '2027-01-10' } };
+  // före spardagen: inget
+  assert.equal(F.planDue(st, pr, '2027-01-24').purchases.length, 0);
+  // spardagen, men A saknar kurs från den 25:e → väntar
+  const pr25 = JSON.parse(JSON.stringify(pr)); pr25.series.a.points = [['2027-01-22', 200]];
+  let d = F.planDue(st, pr25, '2027-01-25'); assert.equal(d.purchases.length, 0); assert.equal(d.waiting, '2027-01-25');
+  // när kurserna finns: köp till första kurs från och med spardagen, 75/25
+  d = F.planDue(st, pr, '2027-01-27'); assert.equal(d.purchases.length, 1);
+  const p = d.purchases[0]; assert.equal(p.date, '2027-01-25'); assert.equal(p.lines.length, 2);
+  assert.equal(p.lines[0].amount, 3000); assert.equal(p.lines[0].price, 101); assert.equal(p.lines[1].amount, 1000); assert.equal(p.lines[1].price, 202);
+  // flera månader tas igen, redan registrerade hoppas över, mars väntar på kurs
+  st.purchases.push(p);
+  d = F.planDue(st, pr, '2027-03-26'); assert.deepEqual(d.purchases.map(q => q.date), ['2027-02-25']); assert.equal(d.waiting, '2027-03-25');
+  // äldre än en vecka utan kurs → senaste kända kurs används
+  d = F.planDue(st, pr, '2027-04-10'); assert.deepEqual(d.purchases.map(q => q.date), ['2027-02-25', '2027-03-25']); assert.equal(d.purchases[1].lines[0].price, 103);
+  // överhoppad spardag, avstängd plan, fel summa
+  st.plan.skipped = ['2027-02-25']; assert.deepEqual(F.planDue(st, pr, '2027-03-01').purchases, []);
+  st.plan.skipped = []; st.plan.auto = false; assert.equal(F.planDue(st, pr, '2027-04-10').purchases.length, 0);
+  st.plan.auto = true; st.plan.alloc = { r: 60, a: 25 }; assert.equal(F.planDue(st, pr, '2027-04-10').purchases.length, 0);
+  // ett manuellt köp på spardagen ersätter det automatiska
+  st.plan.alloc = { r: 75, a: 25 }; st.purchases = [{ id: 'm', date: '2027-01-25', lines: [{ hid: 'r', amount: 1, price: 1, units: 1 }] }];
+  assert.deepEqual(F.planDue(st, pr, '2027-01-27').purchases, []);
+}
 console.log('Alla tester gick igenom');

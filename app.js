@@ -8,9 +8,10 @@
   var prices = { updated: null, series: {} };
   var catalog = [];
   var tab = 'oversikt';
+  var pd = null, pricesLoaded = false, manualOpen = false;
   var draft = null, repIdx = 0, flash = null, openPrice = null, confirmDel = null;
 
-  function blank() { return { settings: { monthlyAmount: 5000, buyDay: 25 }, holdings: [], purchases: [], manualPrices: {} }; }
+  function blank() { return { settings: { monthlyAmount: 0, buyDay: 25 }, holdings: [], purchases: [], manualPrices: {}, plan: null }; }
   function normalise(s) {
     var b = blank();
     if (!s || typeof s !== 'object') return b;
@@ -19,6 +20,10 @@
     if (Array.isArray(s.holdings)) b.holdings = s.holdings.filter(function (h) { return h && h.id && h.name && F.TYPES[h.type]; });
     if (Array.isArray(s.purchases)) b.purchases = s.purchases.filter(function (p) { return p && p.date && Array.isArray(p.lines); });
     if (s.manualPrices && typeof s.manualPrices === 'object') b.manualPrices = s.manualPrices;
+    if (s.plan && typeof s.plan === 'object' && s.plan.alloc && typeof s.plan.alloc === 'object') {
+      var al = {}; for (var k in s.plan.alloc) { var v = +s.plan.alloc[k]; if (v > 0) al[k] = v; }
+      b.plan = { alloc: al, auto: s.plan.auto !== false, since: /^\d{4}-\d{2}-\d{2}$/.test(s.plan.since || '') ? s.plan.since : null, skipped: Array.isArray(s.plan.skipped) ? s.plan.skipped : [] };
+    }
     return b;
   }
   /* Lagring: allt krypteras med AES-GCM. Nyckeln härleds ur lösenordet och finns bara i minnet. */
@@ -142,23 +147,28 @@
     var boughtSinceLast = state.purchases.some(function (p) { return p.date >= last; });
     var h = '';
     var stampDate = next, waiting = false, title, text, actions = '';
+    var autoOn = !!(state.plan && state.plan.auto && state.settings.monthlyAmount > 0), due = autoOn ? F.planDue(state, prices, t) : null;
     if (!state.holdings.length) {
       title = 'Välj dina fonder och aktier';
       text = 'Lägg in det du sparar i och en målfördelning. Sedan sköter appen uträkningarna inför varje köpdag.';
       actions = '<button class="knapp" data-go="innehav">Lägg till innehav</button>';
-    } else if (t === next && !state.purchases.some(function (p) { return p.date >= t; })) {
+    } else if (autoOn && due.waiting) {
+      waiting = true; stampDate = due.waiting; title = 'Månadens köp väntar på kurs';
+      text = 'Sparandet den ' + fd(due.waiting) + ' på ' + kr(state.settings.monthlyAmount) + ' registreras automatiskt när dagens kurser har kommit in.';
+      actions = '<button class="knapp tyst" data-go="rapport">Läs månadsrapporten</button>';
+    } else if (!autoOn && t === next && !state.purchases.some(function (p) { return p.date >= t; })) {
       waiting = true; title = 'Köpdag i dag';
-      text = state.settings.monthlyAmount ? 'Fördela månadens ' + kr(state.settings.monthlyAmount) + ' och läs rapporten för den gångna månaden.' : 'Ange månadsbelopp under Innehav, registrera köpet och läs rapporten för den gångna månaden.';
+      text = state.settings.monthlyAmount ? 'Fördela månadens ' + kr(state.settings.monthlyAmount) + ' och läs rapporten för den gångna månaden.' : 'Lägg upp ditt månadssparande under Sparande, registrera köpet och läs rapporten för den gångna månaden.';
       actions = '<button class="knapp" data-go="kop">Registrera köp</button><button class="knapp tyst" data-go="rapport">Läs månadsrapporten</button>';
-    } else if (first && first < last && !boughtSinceLast) {
+    } else if (!autoOn && first && first < last && !boughtSinceLast) {
       waiting = true; stampDate = last; title = 'Månadens köp saknas';
       text = 'Köpdagen var ' + fd(last) + '. Registrera köpet om det är gjort.';
       actions = '<button class="knapp" data-go="kop">Registrera köp</button><button class="knapp tyst" data-go="rapport">Läs månadsrapporten</button>';
     } else {
       var n = F.daysBetween(t, next);
-      title = n === 0 ? 'Köpet är registrerat' : n === 1 ? 'En dag till köpdagen' : n + ' dagar till köpdagen';
-      text = first ? (state.settings.monthlyAmount ? 'Nästa köp ' + fd(next) + ': ' + kr(state.settings.monthlyAmount) + ' enligt din fördelning.' : 'Nästa köp ' + fd(next) + '. Ange ditt månadsbelopp under Innehav.') : 'Registrera ditt första köp när du har handlat. Det behöver inte vara på köpdagen.';
-      actions = first ? '<button class="knapp tyst" data-go="rapport">Läs senaste rapporten</button>' : '<button class="knapp" data-go="kop">Registrera köp</button>';
+      title = n === 0 ? 'Köpet är registrerat' : n === 1 ? 'En dag till spardagen' : n + ' dagar till spardagen';
+      text = first ? (state.settings.monthlyAmount ? 'Nästa köp ' + fd(next) + ': ' + kr(state.settings.monthlyAmount) + (autoOn ? ', registreras automatiskt.' : ' enligt din fördelning.') : 'Nästa spardag ' + fd(next) + '. Lägg upp ditt månadssparande under Sparande.') : 'Registrera ditt första köp när du har handlat. Det behöver inte vara på köpdagen.';
+      actions = (first ? '<button class="knapp tyst" data-go="rapport">Läs senaste rapporten</button>' : '') + (state.plan ? '' : '<button class="knapp" data-go="kop">Lägg upp månadssparande</button>');
     }
     var sp = stampDate.split('-');
     h += '<section class="kopdag"><div class="stampel' + (waiting ? ' vantar' : '') + '" aria-hidden="true"><b>' + (+sp[2]) + '</b><span>' + MON[+sp[1] - 1] + '</span></div>' +
@@ -218,7 +228,8 @@
     var t = today(), day = buyDay(), last = F.lastBuyDay(t, day), first = F.firstPurchaseDate(state);
     var missed = first && first < last && !state.purchases.some(function (p) { return p.date >= last; });
     var d = { date: missed ? last : t, amount: state.settings.monthlyAmount || 0, pct: {}, price: {} };
-    setPctFromTargets(d); prefillPrices(d);
+    if (state.plan) state.holdings.forEach(function (h) { d.pct[h.id] = +state.plan.alloc[h.id] || 0; }); else setPctFromTargets(d);
+    prefillPrices(d);
     return d;
   }
   function setPctFromTargets(d) {
@@ -234,10 +245,78 @@
   }
   function pctSum() { var s = 0; state.holdings.forEach(function (h) { s += num(draft.pct[h.id]); }); return s; }
 
-  function viewKop() {
-    if (!state.holdings.length) return '<h2>Köp</h2><p>Lägg till minst ett innehav först.</p><button class="knapp" data-go="innehav">Lägg till innehav</button>';
+  /* ---------- Månadssparande ---------- */
+  function newPlanDraft() {
+    var al = {}; if (state.plan) for (var k in state.plan.alloc) if (holding(k)) al[k] = state.plan.alloc[k];
+    return { amount: state.settings.monthlyAmount || '', day: buyDay(), auto: state.plan ? state.plan.auto : true, alloc: al };
+  }
+  function planSum() { var s = 0; for (var k in pd.alloc) s += num(pd.alloc[k]); return s; }
+  function viewPlan() {
+    if (!pd) pd = newPlanDraft();
+    var t = today();
+    var h = '<h2>Månadssparande</h2><p class="muted">Belopp, dag och fördelning gäller varje månad tills du ändrar dem.</p>';
+    if (state.plan && state.settings.monthlyAmount > 0) {
+      var due = F.planDue(state, prices, t);
+      h += '<p class="klart">Du sparar ' + kr(state.settings.monthlyAmount) + ' den ' + buyDay() + ':e varje månad. ' +
+        (state.plan.auto ? (due.waiting ? 'Köpet den ' + fd(due.waiting) + ' registreras när kurserna har kommit in.' : 'Nästa köp registreras automatiskt ' + fd(F.nextBuyDay(t, buyDay())) + '.') : 'Köpen registrerar du själv.') + '</p>';
+    }
+    h += '<div class="tva"><div><label for="s-belopp">Belopp per månad, kr</label><input id="s-belopp" type="number" inputmode="decimal" min="0" step="100" value="' + esc(pd.amount) + '"></div>' +
+      '<div><label for="s-dag">Dag i månaden, 1–28</label><input id="s-dag" type="number" inputmode="numeric" min="1" max="28" step="1" value="' + esc(pd.day) + '"></div></div>';
+    var rows = state.holdings.filter(function (ho) { return pd.alloc[ho.id] != null; });
+    if (!rows.length) h += '<p class="muted" style="margin-top:14px">Välj nedan vilka fonder och aktier sparandet ska gå till.</p>';
+    rows.forEach(function (ho) {
+      h += '<div class="koprad"><div class="namn">' + esc(ho.name) + '</div><div class="falt">' +
+        '<div><label for="sp-' + esc(ho.id) + '">Andel %</label><input id="sp-' + esc(ho.id) + '" type="number" inputmode="decimal" min="0" max="100" step="1" data-spct="' + esc(ho.id) + '" value="' + esc(pd.alloc[ho.id]) + '"></div>' +
+        '<div><span class="etik">Belopp per månad</span><strong data-samt="' + esc(ho.id) + '" style="text-align:left"></strong></div>' +
+        '<div style="text-align:right"><button class="lank" data-act="splanbort" data-id="' + esc(ho.id) + '">Ta bort</button></div></div></div>';
+    });
+    var have = {}; state.holdings.forEach(function (x) { have[x.id] = 1; });
+    var mine = state.holdings.filter(function (ho) { return pd.alloc[ho.id] == null; });
+    h += '<label for="s-add" style="margin-top:16px">Lägg till fond eller aktie i sparandet</label><select id="s-add"><option value="">Välj …</option>';
+    if (mine.length) h += '<optgroup label="Dina innehav">' + mine.map(function (ho) { return '<option value="' + esc(ho.id) + '">' + esc(ho.name) + '</option>'; }).join('') + '</optgroup>';
+    F.TYPE_ORDER.forEach(function (ty) {
+      var items = catalog.filter(function (c) { return c.type === ty && !have[c.id]; });
+      if (items.length) h += '<optgroup label="Fler ' + F.TYPES[ty].toLowerCase() + '">' + items.map(function (c) { return '<option value="' + esc(c.id) + '">' + esc(c.name) + '</option>'; }).join('') + '</optgroup>';
+    });
+    h += '</select><button class="knapp tyst" data-act="splanadd">Lägg till</button>' +
+      '<p id="s-summa" class="small" style="margin-top:14px"></p>' +
+      '<label class="kryss" for="s-auto"><input id="s-auto" type="checkbox"' + (pd.auto ? ' checked' : '') + '> Registrera köpen automatiskt på spardagen, till dagens kurs</label>' +
+      '<p id="s-fel" class="fel" role="alert"></p><button class="knapp" data-act="sparaplan">Spara månadssparande</button>';
+    return h;
+  }
+  function refreshPlan() {
+    if (tab !== 'kop' || !pd) return;
+    var s = planSum(), n = Object.keys(pd.alloc).length;
+    for (var k in pd.alloc) { var el = view.querySelector('[data-samt="' + k + '"]'); if (el) el.textContent = kr(num(pd.amount) * num(pd.alloc[k]) / 100); }
+    var sm = document.getElementById('s-summa');
+    if (sm) { var bad = n && Math.abs(s - 100) > 0.5; sm.textContent = n ? 'Andelarna summerar till ' + (Math.round(s * 10) / 10).toString().replace('.', ',') + ' %.' + (bad ? ' De behöver bli 100 %.' : '') : ''; sm.className = 'small ' + (bad ? 'fel' : 'muted'); }
+  }
+  function savePlan() {
+    var err = document.getElementById('s-fel'), amount = num(pd.amount), day = Math.round(num(pd.day));
+    if (!(amount > 0)) { err.textContent = 'Ange ett belopp per månad som är större än noll.'; return; }
+    if (!(day >= 1 && day <= 28)) { err.textContent = 'Välj en dag mellan 1 och 28, så finns den i alla månader.'; return; }
+    var al = {}, cnt = 0; for (var k in pd.alloc) { var v = num(pd.alloc[k]); if (v > 0) { al[k] = v; cnt++; } }
+    if (!cnt) { err.textContent = 'Lägg till minst en fond eller aktie och ange dess andel.'; return; }
+    if (Math.abs(planSum() - 100) > 0.5) { err.textContent = 'Andelarna behöver summera till 100 %.'; return; }
+    var old = state.plan, fresh = !old || !old.since || (old.auto === false && pd.auto);
+    state.settings.monthlyAmount = amount; state.settings.buyDay = day;
+    state.plan = { alloc: al, auto: !!pd.auto, since: fresh ? today() : old.since, skipped: old && old.skipped ? old.skipped : [] };
+    save(); pd = null;
+    flash = { ok: true, text: 'Månadssparandet är sparat: ' + kr(amount) + ' den ' + day + ':e varje månad.' }; render();
+  }
+  function autoBuy() {
+    if (!state || !pricesLoaded) return;
+    var due = F.planDue(state, prices, today());
+    if (!due.purchases.length) return;
+    due.purchases.forEach(function (p) { state.purchases.push(p); });
+    save();
+    if (!flash) flash = { ok: true, text: due.purchases.length === 1 ? 'Månadssparandet den ' + fd(due.purchases[0].date) + ' är registrerat: ' + kr(state.settings.monthlyAmount) + '.' : due.purchases.length + ' månadsköp är registrerade enligt ditt månadssparande.' };
+  }
+  function viewKop() { return viewPlan() + (state.holdings.length ? viewManual() : ''); }
+
+  function viewManual() {
     if (!draft) draft = newDraft();
-    var h = '<h2>Registrera köp</h2><p class="muted">Välj belopp och hur det ska fördelas. Kursen används för att räkna ut antal andelar.</p>';
+    var h = '<details class="hand"' + (manualOpen ? ' open' : '') + '><summary>Registrera ett köp för hand</summary><p class="muted">För engångsköp, eller om du inte vill ha automatisk registrering. Kursen används för att räkna ut antal andelar.</p>';
     h += '<div class="tva"><div><label for="k-belopp">Belopp, kr</label><input id="k-belopp" type="number" inputmode="decimal" min="0" step="100" value="' + esc(draft.amount) + '"></div>' +
       '<div><label for="k-datum">Köpdatum</label><input id="k-datum" type="date" value="' + esc(draft.date) + '"></div></div>';
     state.holdings.forEach(function (ho) {
@@ -254,11 +333,11 @@
       '<button class="knapp tyst" data-act="styr">Styr mot målet</button>' +
       '<p class="small muted" style="margin-top:10px">”Styr mot målet” lägger mer på det som har halkat efter, så att portföljen närmar sig målfördelningen utan att du säljer något.</p>';
 
-    h += '<h3>Tidigare köp</h3>';
+    h += '</details><h3>Tidigare köp</h3>';
     if (!state.purchases.length) h += '<p class="muted">Inga köp registrerade än. Din första insättning registreras på samma sätt som ett månadsköp.</p>';
     state.purchases.slice().sort(function (a, b) { return a.date < b.date ? 1 : -1; }).forEach(function (p) {
       var tot = p.lines.reduce(function (s, l) { return s + (p.opening && l.value != null ? l.value : l.amount); }, 0);
-      h += '<div class="innehav-rad"><div class="namn">' + fd(p.date) + ' · ' + (p.opening ? 'Ingående innehav, värde ' : '') + kr(tot) + '</div><div class="small muted">' +
+      h += '<div class="innehav-rad"><div class="namn">' + fd(p.date) + ' · ' + (p.opening ? 'Ingående innehav, värde ' : '') + kr(tot) + (p.auto ? ' <span class="small muted">månadssparande</span>' : '') + '</div><div class="small muted">' +
         p.lines.map(function (l) { var ho = holding(l.hid); return esc(ho ? ho.name : l.hid) + ' ' + kr(p.opening && l.value != null ? l.value : l.amount); }).join(', ') + '</div>' +
         '<div class="rad2"><button class="lank" data-act="tabortkop" data-id="' + esc(p.id) + '">' + (confirmDel === 'p' + p.id ? 'Bekräfta: ta bort köpet' : 'Ta bort') + '</button></div></div>';
     });
@@ -364,9 +443,9 @@
   /* ---------- Innehav ---------- */
   function viewInnehav() {
     var t = today(), snap = F.snapshot(state, prices, t), tg = F.targets(state);
-    var h = '<h2>Innehav och sparplan</h2>';
-    h += '<div class="tva"><div><label for="i-belopp">Månadsbelopp, kr</label><input id="i-belopp" type="number" inputmode="decimal" min="0" step="100" value="' + esc(state.settings.monthlyAmount) + '"></div>' +
-      '<div><label for="i-dag">Köpdag i månaden</label><input id="i-dag" type="number" inputmode="numeric" min="1" max="28" step="1" value="' + esc(buyDay()) + '"></div></div>';
+    var h = '<h2>Innehav</h2>';
+    h += '<p class="muted">' + (state.plan && state.settings.monthlyAmount > 0 ? 'Månadssparande: ' + kr(state.settings.monthlyAmount) + ' den ' + buyDay() + ':e. ' : 'Inget månadssparande är upplagt. ') +
+      '<button class="lank" data-go="kop">Ändra under Sparande</button></p>';
 
     h += '<h3>Dina innehav</h3>';
     if (!state.holdings.length) h += '<p class="muted">Listan är tom. Välj fonder och aktier nedan.</p>';
@@ -421,6 +500,7 @@
   function render() {
     document.body.classList.toggle('last', !state);
     if (state && F.resolveOpening(state, prices)) save();
+    autoBuy();
     if (!state) {
       view.innerHTML = viewLock();
       document.getElementById('kursinfo').textContent = '';
@@ -434,11 +514,11 @@
     Array.prototype.forEach.call(document.querySelectorAll('.tabs button'), function (b) {
       if (b.getAttribute('data-tab') === tab) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current');
     });
-    refreshBuy();
+    refreshBuy(); refreshPlan();
     var info = document.getElementById('kursinfo');
     info.textContent = prices.updated ? 'Kurser hämtade ' + fd(prices.updated.slice(0, 10)) : 'Inga automatiska kurser än';
   }
-  function go(t) { tab = t; if (t !== 'kop') draft = null; openPrice = null; confirmDel = null; render(); window.scrollTo(0, 0); }
+  function go(t) { tab = t; if (t !== 'kop') { draft = null; pd = null; } openPrice = null; confirmDel = null; render(); window.scrollTo(0, 0); }
 
   document.querySelector('.tabs').addEventListener('click', function (e) {
     var b = e.target.closest('button[data-tab]'); if (b && state) go(b.getAttribute('data-tab'));
@@ -455,7 +535,14 @@
     }
     if (act === 'las') { saveChain.then(lock); return; }
     if (!state) return;
-    if (act === 'registrera') register();
+    if (act === 'sparaplan') savePlan();
+    else if (act === 'splanbort') { delete pd.alloc[id]; render(); }
+    else if (act === 'splanadd') {
+      var sid = document.getElementById('s-add').value; if (!sid) return;
+      if (!holding(sid)) { var ci = catalog.filter(function (x) { return x.id === sid; })[0]; if (!ci) return; state.holdings.push({ id: ci.id, name: ci.name, type: ci.type, target: 0 }); save(); draft = null; }
+      pd.alloc[sid] = Object.keys(pd.alloc).length ? '' : 100; render();
+    }
+    else if (act === 'registrera') register();
     else if (act === 'mal') { setPctFromTargets(draft); render(); }
     else if (act === 'styr') {
       var amt = num(draft.amount), sug = F.suggestBuy(state, prices, draft.date, amt), acc = 0, lastId = null;
@@ -465,6 +552,8 @@
     }
     else if (act === 'tabortkop') {
       if (confirmDel !== 'p' + id) { confirmDel = 'p' + id; render(); return; }
+      var gone = state.purchases.filter(function (p) { return p.id === id; })[0];
+      if (gone && gone.planDate && state.plan) { state.plan.skipped = (state.plan.skipped || []).concat([gone.planDate]); }
       state.purchases = state.purchases.filter(function (p) { return p.id !== id; }); confirmDel = null; save();
       flash = { ok: true, text: 'Köpet är borttaget.' }; render();
     }
@@ -502,11 +591,16 @@
   });
 
   view.addEventListener('submit', onSubmit);
+  view.addEventListener('toggle', function (e) { if (e.target.classList && e.target.classList.contains('hand')) manualOpen = e.target.open; }, true);
 
   view.addEventListener('input', function (e) {
     var el = e.target;
     if (!state) return;
-    if (el.id === 'k-belopp') { draft.amount = el.value; refreshBuy(); }
+    if (el.id === 's-belopp' || el.id === 's-dag' || el.hasAttribute('data-spct')) { var sf = document.getElementById('s-fel'); if (sf) sf.textContent = ''; }
+    if (el.id === 's-belopp') { pd.amount = el.value; refreshPlan(); }
+    else if (el.id === 's-dag') { pd.day = el.value; }
+    else if (el.hasAttribute('data-spct')) { pd.alloc[el.getAttribute('data-spct')] = el.value; refreshPlan(); }
+    else if (el.id === 'k-belopp') { draft.amount = el.value; refreshBuy(); }
     else if (el.hasAttribute('data-pct')) { draft.pct[el.getAttribute('data-pct')] = el.value; refreshBuy(); }
     else if (el.hasAttribute('data-price')) { draft.price[el.getAttribute('data-price')] = el.value; }
     else if (el.hasAttribute('data-target')) {
@@ -514,14 +608,13 @@
       var s = document.getElementById('i-summa'), sum = F.targets(state).sum;
       if (s) { var bad = Math.abs(sum - 100) > 0.5; s.textContent = 'Målvikterna summerar till ' + (Math.round(sum * 10) / 10).toString().replace('.', ',') + ' %.' + (bad ? ' Justera så att de blir 100 %.' : ''); s.className = 'small ' + (bad ? 'fel' : 'muted'); }
     }
-    else if (el.id === 'i-belopp') { state.settings.monthlyAmount = Math.max(0, num(el.value)); save(); }
   });
   view.addEventListener('change', function (e) {
     var el = e.target;
     if (!state) return;
     if (el.id === 'k-datum') { draft.date = el.value; prefillPrices(draft); render(); }
     else if (el.id === 'r-period') { repIdx = +el.value; render(); }
-    else if (el.id === 'i-dag') { state.settings.buyDay = Math.min(28, Math.max(1, Math.round(num(el.value)) || 25)); save(); render(); }
+    else if (el.id === 's-auto') { pd.auto = el.checked; }
     else if (el.id === 'imp' && el.files && el.files[0]) {
       var rd = new FileReader();
       rd.onload = function () {
@@ -538,5 +631,5 @@
   Promise.all([
     getJson('data/prices.json').then(function (p) { if (p && p.series) prices = p; }).catch(function () {}),
     getJson('data/catalog.json').then(function (c) { if (Array.isArray(c)) catalog = c; }).catch(function () {})
-  ]).then(function () { if (state && !draft) render(); });
+  ]).then(function () { pricesLoaded = true; if (state && !draft && !pd) render(); else if (state) { autoBuy(); } });
 })();
