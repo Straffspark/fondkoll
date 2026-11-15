@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html lang="sv">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Fondkoll</title>
+<meta name="description" content="Månadssparande i fonder och aktier: köp den 25:e, redovisning, analys och förslag.">
+<meta name="theme-color" content="#1E5E4D">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Familjen+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="top">
+  <h1>Fondkoll</h1>
+  <p id="kursinfo" class="kursinfo"></p>
+</header>
+<main id="view" tabindex="-1"></main>
+<nav class="tabs" aria-label="Sidor">
+  <button type="button" data-tab="oversikt">Översikt</button>
+  <button type="button" data-tab="kop">Köp</button>
+  <button type="button" data-tab="rapport">Rapport</button>
+  <button type="button" data-tab="innehav">Innehav</button>
+</nav>
+<script src="core.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
