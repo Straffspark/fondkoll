@@ -35,7 +35,7 @@ async function yahoo(symbol) {
   const off = (res.meta && res.meta.gmtoffset) || 0, close = res.indicators.quote[0].close, points = [];
   res.timestamp.forEach((ts, i) => { if (close[i] != null && isFinite(close[i])) points.push([day((ts + off) * 1000), r4(close[i])]); });
   if (points.length < 2) throw new Error('för få kurser');
-  return { currency: (res.meta && res.meta.currency) || 'SEK', points };
+  return { currency: (res.meta && res.meta.currency) || 'SEK', label: (res.meta && (res.meta.longName || res.meta.shortName)) || '', points };
 }
 async function morningstar(secId) {
   const start = day(Date.now() - 730 * 86400000);
@@ -49,7 +49,8 @@ async function avanzaId(item) {
   const want = item.type === 'aktie' ? 'STOCK' : 'FUND';
   const hits = (r.hits || []).filter((h) => h.type === want && h.orderBookId);
   const exact = hits.find((h) => (h.title || '').toLowerCase() === item.name.toLowerCase());
-  return ((item.isin ? hits[0] : exact) || {}).orderBookId || null;
+  const hit = exact || hits[0];
+  return hit ? { id: hit.orderBookId, title: hit.title } : null;
 }
 async function avanza(item, id) {
   if (item.type === 'aktie') {
@@ -62,13 +63,13 @@ async function avanza(item, id) {
   const nav = +guide.nav, ser = chart.dataSerie || [];
   if (!(nav > 0) || ser.length < 2) throw new Error('inga data');
   const last = 1 + ser[ser.length - 1].y / 100;
-  return { currency: guide.currency || 'SEK', points: ser.filter((p) => p.y != null).map((p) => [day(p.x + 7200000), r4(nav * (1 + p.y / 100) / last)]) };
+  return { currency: 'SEK', label: (guide.name || '') + ' nav=' + nav + ' ' + (guide.currency || guide.tradingCurrency || '?') + ' isin=' + (guide.isin || '?'), points: ser.filter((p) => p.y != null).map((p) => [day(p.x + 7200000), r4(nav * (1 + p.y / 100) / last)]) };
 }
 
 const catalog = JSON.parse(await fs.readFile('data/catalog.json', 'utf8'));
 let old = { series: {} };
 try { old = JSON.parse(await fs.readFile('data/prices.json', 'utf8')); } catch {}
-const series = {}, failed = [];
+const series = {}, failed = [], fx = {};
 let ok = 0;
 
 for (const item of catalog) {
@@ -81,7 +82,20 @@ for (const item of catalog) {
   if (!got && item.isin) await attempt('yahoo-isin', async () => { const s = await yahooSymbol(item.isin); if (!s) throw new Error('ingen träff'); const g = await yahoo(s); symbol = s; return g; });
   const sec = /^(0P[0-9A-Z]{8})/.exec(symbol || '');
   if (item.type !== 'aktie' && sec) await attempt('morningstar', () => morningstar(sec[1]));
-  await attempt('avanza', async () => { const id = item.avanza || await avanzaId(item); if (!id) throw new Error('ingen träff'); return avanza(item, id); });
+  await attempt('avanza', async () => {
+    let id = item.avanza, title = '';
+    if (!id) { const hit = await avanzaId(item); if (!hit) throw new Error('ingen träff'); id = hit.id; title = hit.title; }
+    const g = await avanza(item, id); g.label = 'id ' + id + ' ' + title + ' ' + (g.label || ''); return g;
+  });
+  if (got && got.currency && got.currency !== 'SEK') {
+    try {
+      const pair = got.currency + 'SEK=X';
+      fx[pair] = fx[pair] || (await yahoo(pair)).points;
+      const rates = fx[pair]; let j = 0;
+      got.points = got.points.map((p) => { while (j + 1 < rates.length && rates[j + 1][0] <= p[0]) j++; return rates[j][0] <= p[0] || j === 0 ? [p[0], r4(p[1] * rates[j][1])] : null; }).filter(Boolean);
+      got.label = (got.label || '') + ' (omräknad från ' + got.currency + ')'; got.currency = 'SEK';
+    } catch (e) { why.push('valuta: ' + e.message); got = null; }
+  }
 
   if (got) {
     const merged = new Map(((prev && prev.source === source && prev.points) || []).map((p) => [p[0], p[1]]));
@@ -89,7 +103,7 @@ for (const item of catalog) {
     series[item.id] = { symbol, source, currency: got.currency, points: [...merged.entries()].sort((a, b) => (a[0] < b[0] ? -1 : 1)) };
     ok++;
     const pts = series[item.id].points;
-    console.log('OK   ' + item.name + ' [' + source + '] ' + pts.length + ' dagar, senast ' + pts[pts.length - 1].join(' = ') + (why.length ? '  (' + why.join('; ') + ')' : ''));
+    console.log('OK   ' + item.name + ' [' + source + '] ' + pts.length + ' dagar, senast ' + pts[pts.length - 1].join(' = ') + ' :: ' + (got.label || '') + (why.length ? '  (' + why.join('; ') + ')' : ''));
   } else {
     if (prev) series[item.id] = prev;
     failed.push(item.name);

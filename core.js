@@ -2,8 +2,8 @@
 (function (root) {
   'use strict';
 
-  var TYPES = { ranta: 'Räntefonder', aktiefond: 'Aktiefonder', aktie: 'Aktier' };
-  var TYPE_ORDER = ['ranta', 'aktiefond', 'aktie'];
+  var TYPES = { ranta: 'Räntefonder', blandfond: 'Blandfonder', aktiefond: 'Aktiefonder', aktie: 'Aktier' };
+  var TYPE_ORDER = ['ranta', 'blandfond', 'aktiefond', 'aktie'];
 
   function pad(n) { return (n < 10 ? '0' : '') + n; }
   function iso(y, m, d) { return y + '-' + pad(m) + '-' + pad(d); }
@@ -69,7 +69,7 @@
   function linesFor(state, hid) {
     var out = [];
     (state.purchases || []).forEach(function (p) {
-      p.lines.forEach(function (l) { if (l.hid === hid) out.push({ date: p.date, amount: l.amount, units: l.units, price: l.price }); });
+      p.lines.forEach(function (l) { if (l.hid === hid) out.push({ date: p.date, amount: l.amount, units: l.units, price: l.price, value: l.value, opening: !!p.opening }); });
     });
     return out;
   }
@@ -80,10 +80,15 @@
     var byType = {};
     TYPE_ORDER.forEach(function (t) { byType[t] = { value: 0, invested: 0 }; });
     (state.holdings || []).forEach(function (h) {
-      var units = 0, inv = 0;
-      linesFor(state, h.id).forEach(function (l) { if (l.date <= date) { units += l.units; inv += l.amount; } });
+      var units = 0, inv = 0, invResolved = 0, fixed = 0;
+      linesFor(state, h.id).forEach(function (l) {
+        if (l.date > date) return;
+        inv += l.amount;
+        if (l.units != null) { units += l.units; invResolved += (l.opening && l.value != null) ? l.value : l.amount; }
+        else if (l.value != null) fixed += l.value; /* ingående innehav som ännu saknar kurs */
+      });
       var pr = priceOn(state, prices, h.id, date);
-      var value = pr ? units * pr.price : inv;
+      var value = (pr ? units * pr.price : invResolved) + fixed;
       rows.push({ id: h.id, name: h.name, type: h.type, target: +h.target || 0, units: units, price: pr ? pr.price : null,
         priceDate: pr ? pr.date : null, source: pr ? pr.source : null, value: value, invested: inv });
       total += value; invested += inv;
@@ -109,28 +114,31 @@
   function periodReport(state, prices, start, end) {
     var s0 = snapshot(state, prices, start), s1 = snapshot(state, prices, end);
     var rows = [], byType = {};
-    TYPE_ORDER.forEach(function (t) { byType[t] = { v0: 0, buys: 0, v1: 0, gain: 0, count: 0 }; });
-    var tot = { v0: 0, buys: 0, v1: 0, gain: 0 };
+    TYPE_ORDER.forEach(function (t) { byType[t] = { v0: 0, buys: 0, open: 0, v1: 0, gain: 0, count: 0 }; });
+    var tot = { v0: 0, buys: 0, open: 0, v1: 0, gain: 0 };
     s1.rows.forEach(function (r1, i) {
       var r0 = s0.rows[i];
-      var buys = 0;
-      linesFor(state, r1.id).forEach(function (l) { if (l.date > start && l.date <= end) buys += l.amount; });
-      var gain = r1.value - r0.value - buys;
-      var base = r0.value + buys;
+      var buys = 0, open = 0;
+      linesFor(state, r1.id).forEach(function (l) {
+        if (!(l.date > start && l.date <= end)) return;
+        if (l.opening) open += (l.value != null ? l.value : l.amount); else buys += l.amount;
+      });
+      var gain = r1.value - r0.value - buys - open;
+      var base = r0.value + buys + open;
       var p0 = priceOn(state, prices, r1.id, start);
       var priceChange = (p0 && r1.price != null && p0.price > 0) ? r1.price / p0.price - 1 : null;
-      if (r1.units === 0 && buys === 0 && r0.value === 0) {
+      if (r1.value === 0 && buys === 0 && open === 0 && r0.value === 0) {
         rows.push({ id: r1.id, name: r1.name, type: r1.type, v0: 0, buys: 0, v1: 0, gain: 0, pct: null, priceChange: priceChange, empty: true, priceDate: r1.priceDate });
         return;
       }
-      rows.push({ id: r1.id, name: r1.name, type: r1.type, v0: r0.value, buys: buys, v1: r1.value, gain: gain,
+      rows.push({ id: r1.id, name: r1.name, type: r1.type, v0: r0.value, buys: buys, open: open, v1: r1.value, gain: gain,
         pct: base > 0 ? gain / base : null, priceChange: priceChange, priceDate: r1.priceDate });
       var t = byType[r1.type];
-      if (t) { t.v0 += r0.value; t.buys += buys; t.v1 += r1.value; t.gain += gain; t.count++; }
-      tot.v0 += r0.value; tot.buys += buys; tot.v1 += r1.value; tot.gain += gain;
+      if (t) { t.v0 += r0.value; t.buys += buys; t.open += open; t.v1 += r1.value; t.gain += gain; t.count++; }
+      tot.v0 += r0.value; tot.buys += buys; tot.open += open; tot.v1 += r1.value; tot.gain += gain;
     });
-    TYPE_ORDER.forEach(function (t) { var b = byType[t]; b.pct = (b.v0 + b.buys) > 0 ? b.gain / (b.v0 + b.buys) : null; });
-    tot.pct = (tot.v0 + tot.buys) > 0 ? tot.gain / (tot.v0 + tot.buys) : null;
+    TYPE_ORDER.forEach(function (t) { var b = byType[t]; b.pct = (b.v0 + b.buys + b.open) > 0 ? b.gain / (b.v0 + b.buys + b.open) : null; });
+    tot.pct = (tot.v0 + tot.buys + tot.open) > 0 ? tot.gain / (tot.v0 + tot.buys + tot.open) : null;
     return { start: start, end: end, rows: rows, byType: byType, total: tot, snapEnd: s1 };
   }
 
@@ -169,9 +177,10 @@
   function analysis(report) {
     var out = [];
     var t = report.total;
-    if (t.v1 === 0 && t.buys === 0) return ['Inga innehav under perioden.'];
+    if (t.v1 === 0 && t.buys === 0 && !t.open) return ['Inga innehav under perioden.'];
     out.push('Portföljen gick från ' + fmtKr(t.v0) + ' till ' + fmtKr(t.v1) + '. Av förändringen är ' + fmtKr(t.buys) +
-      ' nya köp och ' + fmtSignedKr(t.gain) + ' värdeutveckling (' + fmtPct(t.pct, 2) + ').');
+      ' nya köp och ' + fmtSignedKr(t.gain) + ' värdeutveckling (' + fmtPct(t.pct, 2) + ').' +
+      (t.open ? ' Dessutom lades befintliga innehav värda ' + fmtKr(t.open) + ' in i appen under perioden; utvecklingen räknas från den dagen.' : ''));
     TYPE_ORDER.forEach(function (ty) {
       var b = report.byType[ty];
       if (!b.count) return;
@@ -205,7 +214,7 @@
       recs.push({ level: 'overvag', title: 'Köpet var mindre än planerat', text: 'Du köpte för ' + fmtKr(report.total.buys) + ' mot planerade ' + fmtKr(monthly) + '. Justera sparbeloppet under Innehav om det nya beloppet ska gälla framåt.' });
     }
 
-    var stale = snap.rows.filter(function (r) { return r.units > 0 && (r.priceDate == null || daysBetween(r.priceDate, report.end) > 7); });
+    var stale = snap.rows.filter(function (r) { return r.value > 0 && (r.priceDate == null || daysBetween(r.priceDate, report.end) > 7); });
     if (stale.length) {
       recs.push({ level: 'gor', title: 'Uppdatera kurser', text: 'Aktuell kurs saknas för ' + stale.map(function (r) { return r.name; }).join(', ') + '. Ange kurs under Innehav så blir rapporten rättvisande.' });
     }
@@ -260,7 +269,7 @@
       recs.push({ level: 'overvag', title: 'Räntefonderna gav minus', text: 'Kontrollera att räntefonderna har kort räntebindning och god kreditkvalitet om pengarna ska användas snart.' });
     }
 
-    var totals = (state.purchases || []).slice().sort(function (a, b) { return a.date < b.date ? -1 : 1; })
+    var totals = (state.purchases || []).filter(function (pu) { return !pu.opening; }).sort(function (a, b) { return a.date < b.date ? -1 : 1; })
       .map(function (pu) { return pu.lines.reduce(function (s, l) { return s + l.amount; }, 0); });
     if (totals.length >= 12) {
       var last12 = totals.slice(-12);
@@ -293,6 +302,20 @@
     return out;
   }
 
+  /* Räknar om ingående innehav (värde i kronor) till andelar när en kurs finns. */
+  function resolveOpening(state, prices) {
+    var changed = 0;
+    (state.purchases || []).forEach(function (p) {
+      if (!p.opening) return;
+      p.lines.forEach(function (l) {
+        if (l.units != null || l.value == null) return;
+        var pr = priceOn(state, prices, l.hid, p.date);
+        if (pr && pr.price > 0 && daysBetween(pr.date, p.date) <= 10) { l.price = pr.price; l.units = l.value / pr.price; changed++; }
+      });
+    });
+    return changed;
+  }
+
   function firstPurchaseDate(state) {
     var f = null;
     (state.purchases || []).forEach(function (p) { if (!f || p.date < f) f = p.date; });
@@ -320,7 +343,7 @@
   var api = { TYPES: TYPES, TYPE_ORDER: TYPE_ORDER, lastBuyDay: lastBuyDay, nextBuyDay: nextBuyDay, prevBuyDay: prevBuyDay,
     followingBuyDay: followingBuyDay, daysBetween: daysBetween, priceOn: priceOn, snapshot: snapshot, targets: targets,
     periodReport: periodReport, suggestBuy: suggestBuy, typeShares: typeShares, analysis: analysis,
-    recommendations: recommendations, history: history, reportPeriods: reportPeriods, firstPurchaseDate: firstPurchaseDate,
+    recommendations: recommendations, history: history, resolveOpening: resolveOpening, reportPeriods: reportPeriods, firstPurchaseDate: firstPurchaseDate,
     fmtKr: fmtKr, fmtPct: fmtPct, fmtSignedKr: fmtSignedKr };
   if (typeof module !== 'undefined' && module.exports) module.exports = api; else root.Fondkoll = api;
 })(typeof window !== 'undefined' ? window : globalThis);

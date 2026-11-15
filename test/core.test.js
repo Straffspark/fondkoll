@@ -84,4 +84,19 @@ assert.equal(h[0].value, 550000); assert.ok(h.length >= 4);
 assert.ok(F.analysis(rep).length === 3);
 assert.equal(F.fmtKr(1234567.4), '1 234 567 kr');
 assert.equal(F.fmtPct(-0.0123, 2), '−1,23 %');
+
+// Ingående innehav: värde 1000, anskaffning 600, kurs 200 → 5 andelar; utveckling räknas från importdagen
+const so = { settings: { monthlyAmount: 0, buyDay: 25 }, holdings: [{ id: 'a', name: 'Globalfond', type: 'aktiefond', target: 100 }],
+  purchases: [{ id: 'o', date: '2026-11-27', opening: true, lines: [{ hid: 'a', amount: 600, value: 1000, price: null, units: null }] }], manualPrices: {} };
+let sn = F.snapshot(so, prices, '2026-12-25');
+assert.equal(sn.total, 1000); assert.equal(sn.invested, 600);
+assert.equal(F.resolveOpening(so, prices), 1);
+assert.equal(so.purchases[0].lines[0].units, 5);
+sn = F.snapshot(so, prices, '2026-12-25');
+assert.equal(sn.total, 900); assert.equal(sn.invested, 600);
+const ro = F.periodReport(so, prices, '2026-11-25', '2026-12-25');
+assert.equal(ro.total.buys, 0); assert.equal(ro.total.open, 1000); assert.equal(Math.round(ro.total.gain), -100);
+assert.ok(Math.abs(ro.total.pct + 0.10) < 1e-9);
+assert.ok(/befintliga innehav/.test(F.analysis(ro)[0]));
+assert.equal(F.TYPE_ORDER.length, 4);
 console.log('Alla tester gick igenom');

@@ -128,7 +128,7 @@
       actions = '<button class="knapp" data-go="innehav">Lägg till innehav</button>';
     } else if (t === next && !state.purchases.some(function (p) { return p.date >= t; })) {
       waiting = true; title = 'Köpdag i dag';
-      text = 'Fördela månadens ' + kr(state.settings.monthlyAmount) + ' och läs rapporten för den gångna månaden.';
+      text = state.settings.monthlyAmount ? 'Fördela månadens ' + kr(state.settings.monthlyAmount) + ' och läs rapporten för den gångna månaden.' : 'Ange månadsbelopp under Innehav, registrera köpet och läs rapporten för den gångna månaden.';
       actions = '<button class="knapp" data-go="kop">Registrera köp</button><button class="knapp tyst" data-go="rapport">Läs månadsrapporten</button>';
     } else if (first && first < last && !boughtSinceLast) {
       waiting = true; stampDate = last; title = 'Månadens köp saknas';
@@ -137,7 +137,7 @@
     } else {
       var n = F.daysBetween(t, next);
       title = n === 0 ? 'Köpet är registrerat' : n === 1 ? 'En dag till köpdagen' : n + ' dagar till köpdagen';
-      text = first ? 'Nästa köp ' + fd(next) + ': ' + kr(state.settings.monthlyAmount) + ' enligt din fördelning.' : 'Registrera ditt första köp när du har handlat. Det behöver inte vara på köpdagen.';
+      text = first ? (state.settings.monthlyAmount ? 'Nästa köp ' + fd(next) + ': ' + kr(state.settings.monthlyAmount) + ' enligt din fördelning.' : 'Nästa köp ' + fd(next) + '. Ange ditt månadsbelopp under Innehav.') : 'Registrera ditt första köp när du har handlat. Det behöver inte vara på köpdagen.';
       actions = first ? '<button class="knapp tyst" data-go="rapport">Läs senaste rapporten</button>' : '<button class="knapp" data-go="kop">Registrera köp</button>';
     }
     var sp = stampDate.split('-');
@@ -237,9 +237,9 @@
     h += '<h3>Tidigare köp</h3>';
     if (!state.purchases.length) h += '<p class="muted">Inga köp registrerade än. Din första insättning registreras på samma sätt som ett månadsköp.</p>';
     state.purchases.slice().sort(function (a, b) { return a.date < b.date ? 1 : -1; }).forEach(function (p) {
-      var tot = p.lines.reduce(function (s, l) { return s + l.amount; }, 0);
-      h += '<div class="innehav-rad"><div class="namn">' + fd(p.date) + ' · ' + kr(tot) + '</div><div class="small muted">' +
-        p.lines.map(function (l) { var ho = holding(l.hid); return esc(ho ? ho.name : l.hid) + ' ' + kr(l.amount); }).join(', ') + '</div>' +
+      var tot = p.lines.reduce(function (s, l) { return s + (p.opening && l.value != null ? l.value : l.amount); }, 0);
+      h += '<div class="innehav-rad"><div class="namn">' + fd(p.date) + ' · ' + (p.opening ? 'Ingående innehav, värde ' : '') + kr(tot) + '</div><div class="small muted">' +
+        p.lines.map(function (l) { var ho = holding(l.hid); return esc(ho ? ho.name : l.hid) + ' ' + kr(p.opening && l.value != null ? l.value : l.amount); }).join(', ') + '</div>' +
         '<div class="rad2"><button class="lank" data-act="tabortkop" data-id="' + esc(p.id) + '">' + (confirmDel === 'p' + p.id ? 'Bekräfta: ta bort köpet' : 'Ta bort') + '</button></div></div>';
     });
     return h;
@@ -305,6 +305,7 @@
     h += '<dl class="nyckeltal"><div><dt>Värde vid slutet</dt><dd>' + kr(rep.total.v1) + '</dd></div><div><dt>Köp i perioden</dt><dd>' + kr(rep.total.buys) +
       '</dd></div><div><dt>Utveckling</dt><dd class="' + cls(rep.total.gain) + '">' + F.fmtSignedKr(rep.total.gain) + '</dd></div></dl>';
 
+    if (rep.total.open) h += '<p class="small muted">Befintliga innehav värda ' + kr(rep.total.open) + ' lades in under perioden. De räknas inte som köp, och utvecklingen mäts från den dagen.</p>';
     h += '<h3>Redovisning per tillgångsslag</h3><div class="rulla"><table><thead><tr><th>Innehav</th><th>Köp</th><th>Värde</th><th>Utveckling</th></tr></thead><tbody>';
     F.TYPE_ORDER.forEach(function (t) {
       var b = rep.byType[t];
@@ -351,7 +352,7 @@
     if (!state.holdings.length) h += '<p class="muted">Listan är tom. Välj fonder och aktier nedan.</p>';
     snap.rows.forEach(function (r) {
       var used = hasLines(r.id);
-      h += '<div class="innehav-rad"><div class="namn">' + esc(r.name) + ' <span class="small muted">' + F.TYPES[r.type].replace(/er$/, '').replace(/fond$/, 'fond') + '</span></div><div class="rad2">' +
+      h += '<div class="innehav-rad"><div class="namn">' + esc(r.name) + ' <span class="small muted">' + F.TYPES[r.type].replace(/er$/, '') + '</span></div><div class="rad2">' +
         '<span><label style="display:inline;margin:0" for="m-' + esc(r.id) + '">Mål %</label> <input id="m-' + esc(r.id) + '" type="number" inputmode="decimal" min="0" max="100" step="1" data-target="' + esc(r.id) + '" value="' + esc(r.target) + '"></span>' +
         '<span>' + (r.price != null ? 'Kurs ' + fmtPrice(r.price) + ' (' + fd(r.priceDate, true) + ', ' + r.source + ')' : 'Ingen kurs än') + '</span>' +
         (r.units ? '<span>Värde ' + kr(r.value) + '</span>' : '') + '</div><div class="rad2">' +
@@ -397,6 +398,7 @@
   /* ---------- Gemensamt ---------- */
   function render() {
     document.body.classList.toggle('last', !state);
+    if (state && F.resolveOpening(state, prices)) save();
     if (!state) {
       view.innerHTML = viewLock();
       document.getElementById('kursinfo').textContent = '';
