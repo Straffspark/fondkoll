@@ -3,13 +3,14 @@
   'use strict';
   var F = window.Fondkoll;
   var KEY = 'fondkoll.v1';
+  var ONE = { ranta: 'Räntefond', blandfond: 'Blandfond', aktiefond: 'Aktiefond', aktie: 'Aktie' };
   var MON = ['jan', 'feb', 'mars', 'april', 'maj', 'juni', 'juli', 'aug', 'sep', 'okt', 'nov', 'dec'];
   var view = document.getElementById('view');
   var prices = { updated: null, series: {} };
   var catalog = [];
   var tab = 'oversikt';
   var pd = null, pricesLoaded = false, manualOpen = false;
-  var search = { term: '', rows: null, busy: false, err: '' }, msBusy = false, msTried = {};
+  var search = { term: '', rows: null, busy: false, err: '' }, msBusy = false, msTried = {}, shown = null;
   var draft = null, repIdx = 0, flash = null, openPrice = null, confirmDel = null;
 
   function blank() { return { settings: { monthlyAmount: 0, buyDay: 25 }, holdings: [], purchases: [], manualPrices: {}, plan: null, priceCache: {} }; }
@@ -290,7 +291,7 @@
     msBusy = true;
     return Promise.all(todo.map(function (h) {
       return msSeries(h).then(function (pts) { if (state && holding(h.id)) state.priceCache[h.id] = { fetched: Date.now(), points: pts }; }, function () {});
-    })).then(function () { msBusy = false; if (!state) return; mergeCache(); save(); if (!draft && !pd && !search.busy) render(); else autoBuy(); });
+    })).then(function () { msBusy = false; if (!state) return; mergeCache(); save(); if (!flash && shown && Date.now() - shown.at < 5000) flash = shown.f; if (!draft && !pd && !search.busy) render(); else autoBuy(); });
   }
   function searchResults() {
     if (search.busy) return '<p class="muted">Söker …</p>';
@@ -300,7 +301,7 @@
     var h = '';
     search.rows.forEach(function (r, i) {
       var ty = msType(r), held = state.holdings.some(function (x) { return x.id === 'ms-' + r.SecId || (r.ISIN && x.isin === r.ISIN); }) || catalog.some(function (c) { return r.ISIN && c.isin === r.ISIN && holding(c.id); });
-      h += '<div class="innehav-rad"><div class="namn">' + esc(r.Name) + '</div><div class="rad2"><span>' + F.TYPES[ty].replace(/(er|r)$/, '') +
+      h += '<div class="innehav-rad"><div class="namn">' + esc(r.Name) + '</div><div class="rad2"><span>' + ONE[ty] +
         (r.Ticker ? ' · ' + esc(r.Ticker) : r.CategoryName ? ' · ' + esc(r.CategoryName) : '') + '</span>' +
         (r.ClosePrice ? '<span>' + fmtPrice(+r.ClosePrice) + ' ' + esc(r.PriceCurrency || '') + '</span>' : '') +
         (held ? '<span>Finns redan bland dina innehav</span>' : '<button class="knapp liten" data-act="msadd" data-id="' + i + '">Lägg till</button>') + '</div></div>';
@@ -592,6 +593,7 @@
     }
     var views = { oversikt: viewOversikt, kop: viewKop, rapport: viewRapport, innehav: viewInnehav };
     var msg = flash ? '<p class="' + (flash.ok ? 'klart' : 'notis') + '" role="status">' + esc(flash.text) + '</p>' : '';
+    shown = flash ? { f: flash, at: Date.now() } : shown;
     flash = null;
     view.innerHTML = msg + views[tab]();
     Array.prototype.forEach.call(document.querySelectorAll('.tabs button'), function (b) {
