@@ -533,7 +533,7 @@
     if (!state.holdings.length) h += '<p class="muted">Listan är tom. Välj fonder och aktier nedan.</p>';
     snap.rows.forEach(function (r) {
       var used = hasLines(r.id);
-      h += '<div class="innehav-rad"><div class="namn">' + esc(r.name) + ' <span class="small muted">' + F.TYPES[r.type].replace(/er$/, '') + '</span></div><div class="rad2">' +
+      h += '<div class="innehav-rad"><div class="namn">' + esc(r.name) + ' <span class="small muted">' + ONE[r.type] + '</span></div><div class="rad2">' +
         '<span><label style="display:inline;margin:0" for="m-' + esc(r.id) + '">Mål %</label> <input id="m-' + esc(r.id) + '" type="number" inputmode="decimal" min="0" max="100" step="1" data-target="' + esc(r.id) + '" value="' + esc(r.target) + '"></span>' +
         '<span>' + (r.price != null ? 'Kurs ' + fmtPrice(r.price) + ' (' + fd(r.priceDate, true) + ', ' + r.source + ')' : 'Ingen kurs än') + '</span>' +
         (r.units ? '<span>Värde ' + kr(r.value) + '</span>' : '') + '</div><div class="rad2">' +
