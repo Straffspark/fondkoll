@@ -60,6 +60,15 @@
       });
     });
   }
+  /* Förberedda innehav som följer med appen, krypterade med en startkod. */
+  function loadStart(code) {
+    var norm = String(code).toUpperCase().replace(/[^A-Z0-9]/g, '');
+    return fetch('data/start.json', { cache: 'no-store' }).then(function (r) { if (!r.ok) throw new Error('saknas'); return r.json(); }).then(function (st) {
+      return deriveKey(norm, unb64(st.salt)).then(function (k) {
+        return crypto.subtle.decrypt({ name: 'AES-GCM', iv: unb64(st.iv) }, k, unb64(st.data));
+      });
+    }).then(function (pt) { return normalise(JSON.parse(new TextDecoder().decode(pt))); });
+  }
   function lock() { state = null; cryptoKey = null; draft = null; tab = 'oversikt'; lockErr = ''; wipeAsk = false; render(); }
 
   function viewLock() {
@@ -68,7 +77,9 @@
     if (!stored()) {
       return '<h2>Välj ett lösenord</h2><p class="muted">Lösenordet krypterar dina belopp, köp och innehav i den här webbläsaren. Du anger det varje gång du öppnar appen.</p>' +
         '<form data-form="setup"><label for="pw1">Lösenord, minst 8 tecken</label><input id="pw1" type="password" autocomplete="new-password" minlength="8" required>' +
-        '<label for="pw2">Upprepa lösenordet</label><input id="pw2" type="password" autocomplete="new-password" minlength="8" required>' + err +
+        '<label for="pw2">Upprepa lösenordet</label><input id="pw2" type="password" autocomplete="new-password" minlength="8" required>' +
+        '<label for="kod">Startkod, om du har fått en</label><input id="kod" type="text" autocomplete="off" autocapitalize="characters" spellcheck="false" placeholder="XXXX-XXXX-XXXX-XXXX">' +
+        '<p class="small muted">Med startkoden läggs dina förberedda innehav och belopp in direkt. Lämna tomt för att börja utan innehav.</p>' + err +
         '<button class="knapp" type="submit"' + (busy ? ' disabled' : '') + '>Spara lösenord</button></form>' +
         '<p class="notis">Lösenordet går inte att återställa. Glömmer du det kan uppgifterna inte läsas, så spara det i en lösenordshanterare.</p>';
     }
@@ -87,9 +98,18 @@
       if (p1.length < 8) { lockErr = 'Lösenordet behöver vara minst 8 tecken.'; flashErr(kind); return; }
       if (p1 !== p2) { lockErr = 'Lösenorden är inte lika. Skriv dem igen.'; flashErr(kind); return; }
       busy = true; lockErr = '';
-      setPassword(p1, kind === 'byt' ? state : (legacy() || blank())).then(function () {
-        busy = false; flash = { ok: true, text: kind === 'byt' ? 'Lösenordet är bytt.' : 'Lösenordet är sparat och dina uppgifter är krypterade.' }; render();
-      }, function () { busy = false; lockErr = 'Det gick inte att spara. Kontrollera att webbläsaren tillåter lagring.'; if (kind === 'setup') { state = null; cryptoKey = null; } flashErr(kind); });
+      var code = kind === 'setup' ? pwField('kod').trim() : '';
+      var source = kind === 'byt' ? Promise.resolve(state) : code ? loadStart(code) : Promise.resolve(legacy() || blank());
+      source.then(function (data) { return setPassword(p1, data); }, function () { throw 'kod'; }).then(function () {
+        busy = false; flash = { ok: true, text: kind === 'byt' ? 'Lösenordet är bytt.' : code ? 'Lösenordet är sparat och dina innehav är inlagda.' : 'Lösenordet är sparat och dina uppgifter är krypterade.' }; render();
+      }, function (why) {
+        if (why === 'kod') { busy = false; lockErr = 'Startkoden stämmer inte. Kontrollera tecknen, eller lämna fältet tomt för att börja utan innehav.'; render(); return; } busy = false; lockErr = 'Det gick inte att spara. Kontrollera att webbläsaren tillåter lagring.'; if (kind === 'setup') { state = null; cryptoKey = null; } flashErr(kind); });
+    } else if (kind === 'startkod') {
+      var fel = document.getElementById('kod-fel'), c = pwField('kod2').trim();
+      if (!c) { fel.textContent = 'Skriv in startkoden.'; return; }
+      busy = true;
+      loadStart(c).then(function (data) { busy = false; state = data; save(); flash = { ok: true, text: 'Dina innehav är inlagda.' }; render(); },
+        function () { busy = false; fel.textContent = 'Startkoden stämmer inte. Kontrollera tecknen och försök igen.'; });
     } else if (kind === 'unlock') {
       busy = true; lockErr = '';
       unlock(pwField('pw')).then(function () { busy = false; render(); }, function () { busy = false; lockErr = 'Fel lösenord. Försök igen.'; render(); var el = document.getElementById('pw'); if (el) el.focus(); });
@@ -388,6 +408,8 @@
       '<form data-form="byt" class="panel" style="margin-top:14px"><p><strong>Byt lösenord</strong></p><div class="tva"><div><label for="pw1">Nytt lösenord</label><input id="pw1" type="password" autocomplete="new-password" minlength="8" required></div>' +
       '<div><label for="pw2">Upprepa</label><input id="pw2" type="password" autocomplete="new-password" minlength="8" required></div></div>' +
       '<button class="knapp tyst" type="submit">Byt lösenord</button><p id="byt-fel" class="fel" role="alert"></p></form>';
+    h += '<h3>Hämta innehav med startkod</h3><form data-form="startkod"><label for="kod2">Startkod</label><input id="kod2" type="text" autocomplete="off" autocapitalize="characters" spellcheck="false" placeholder="XXXX-XXXX-XXXX-XXXX">' +
+      '<p class="small muted">Lägger in dina förberedda innehav och belopp. Det som redan finns i appen ersätts.</p><button class="knapp tyst" type="submit">Hämta innehav</button><p id="kod-fel" class="fel" role="alert"></p></form>';
     h += '<h3>Dina uppgifter</h3><p class="muted">Belopp, köp och innehav sparas krypterade i den här webbläsaren och syns inte för någon annan. Exportera en kopia om du vill byta enhet eller ha en reserv. Kopian är inte krypterad, så förvara den säkert.</p>' +
       (saveFailed ? '<p class="fel">Webbläsaren tillåter inte att uppgifterna sparas. Exportera en kopia innan du stänger sidan.</p>' : '') +
       '<button class="knapp tyst" data-act="export">Exportera kopia</button><label class="knapp tyst" for="imp" style="color:var(--spruce)">Importera kopia</label><input id="imp" type="file" accept="application/json,.json" hidden>';
