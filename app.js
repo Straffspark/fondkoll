@@ -21,10 +21,83 @@
     if (s.manualPrices && typeof s.manualPrices === 'object') b.manualPrices = s.manualPrices;
     return b;
   }
-  function load() { try { return normalise(JSON.parse(localStorage.getItem(KEY))); } catch (e) { return blank(); } }
-  var saveFailed = false;
-  function save() { try { localStorage.setItem(KEY, JSON.stringify(state)); saveFailed = false; } catch (e) { saveFailed = true; } }
-  var state = load();
+  /* Lagring: allt krypteras med AES-GCM. Nyckeln härleds ur lösenordet och finns bara i minnet. */
+  var KEY2 = 'fondkoll.v2';
+  var state = null, cryptoKey = null, salt = null, saveFailed = false, saveChain = Promise.resolve();
+  var lockErr = '', wipeAsk = false, busy = false;
+  function stored() { try { return JSON.parse(localStorage.getItem(KEY2)); } catch (e) { return null; } }
+  function legacy() { try { var raw = localStorage.getItem(KEY); return raw ? normalise(JSON.parse(raw)) : null; } catch (e) { return null; } }
+  function b64(buf) { var b = new Uint8Array(buf), t = ''; for (var i = 0; i < b.length; i++) t += String.fromCharCode(b[i]); return btoa(t); }
+  function unb64(t) { var r = atob(t), b = new Uint8Array(r.length); for (var i = 0; i < r.length; i++) b[i] = r.charCodeAt(i); return b; }
+  function deriveKey(pw, saltBytes) {
+    return crypto.subtle.importKey('raw', new TextEncoder().encode(pw), 'PBKDF2', false, ['deriveKey']).then(function (base) {
+      return crypto.subtle.deriveKey({ name: 'PBKDF2', salt: saltBytes, iterations: 250000, hash: 'SHA-256' }, base, { name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']);
+    });
+  }
+  function writeEncrypted() {
+    var iv = crypto.getRandomValues(new Uint8Array(12));
+    return crypto.subtle.encrypt({ name: 'AES-GCM', iv: iv }, cryptoKey, new TextEncoder().encode(JSON.stringify(state))).then(function (ct) {
+      localStorage.setItem(KEY2, JSON.stringify({ v: 2, salt: b64(salt), iv: b64(iv), data: b64(ct) }));
+      saveFailed = false;
+    });
+  }
+  function save() {
+    if (!cryptoKey || !state) return;
+    saveChain = saveChain.then(writeEncrypted).catch(function () { saveFailed = true; });
+  }
+  function setPassword(pw, data) {
+    salt = crypto.getRandomValues(new Uint8Array(16));
+    return deriveKey(pw, salt).then(function (k) {
+      cryptoKey = k; state = data;
+      return writeEncrypted().then(function () { try { localStorage.removeItem(KEY); } catch (e) {} });
+    });
+  }
+  function unlock(pw) {
+    var st = stored(), sb = unb64(st.salt);
+    return deriveKey(pw, sb).then(function (k) {
+      return crypto.subtle.decrypt({ name: 'AES-GCM', iv: unb64(st.iv) }, k, unb64(st.data)).then(function (pt) {
+        state = normalise(JSON.parse(new TextDecoder().decode(pt))); cryptoKey = k; salt = sb;
+      });
+    });
+  }
+  function lock() { state = null; cryptoKey = null; draft = null; tab = 'oversikt'; lockErr = ''; wipeAsk = false; render(); }
+
+  function viewLock() {
+    if (!(window.crypto && crypto.subtle)) return '<h2>Appen kan inte låsas upp här</h2><p>Krypteringen kräver en säker anslutning. Öppna appen via adressen som börjar med https.</p>';
+    var err = '<p class="fel" role="alert">' + esc(lockErr) + '</p>';
+    if (!stored()) {
+      return '<h2>Välj ett lösenord</h2><p class="muted">Lösenordet krypterar dina belopp, köp och innehav i den här webbläsaren. Du anger det varje gång du öppnar appen.</p>' +
+        '<form data-form="setup"><label for="pw1">Lösenord, minst 8 tecken</label><input id="pw1" type="password" autocomplete="new-password" minlength="8" required>' +
+        '<label for="pw2">Upprepa lösenordet</label><input id="pw2" type="password" autocomplete="new-password" minlength="8" required>' + err +
+        '<button class="knapp" type="submit"' + (busy ? ' disabled' : '') + '>Spara lösenord</button></form>' +
+        '<p class="notis">Lösenordet går inte att återställa. Glömmer du det kan uppgifterna inte läsas, så spara det i en lösenordshanterare.</p>';
+    }
+    return '<h2>Lås upp Fondkoll</h2><form data-form="unlock"><label for="pw">Lösenord</label><input id="pw" type="password" autocomplete="current-password" required>' + err +
+      '<button class="knapp" type="submit"' + (busy ? ' disabled' : '') + '>Lås upp</button></form>' +
+      '<h3>Glömt lösenordet?</h3><p class="muted">Det går inte att återställa. Har du en exporterad kopia kan du radera uppgifterna här, välja nytt lösenord och importera kopian.</p>' +
+      '<button class="lank" data-act="radera">' + (wipeAsk ? 'Bekräfta: radera alla uppgifter i den här webbläsaren' : 'Radera uppgifterna och börja om') + '</button>';
+  }
+  function pwField(id) { var el = document.getElementById(id); return el ? el.value : ''; }
+  function onSubmit(e) {
+    var f = e.target.closest('form[data-form]'); if (!f) return;
+    e.preventDefault(); if (busy) return;
+    var kind = f.getAttribute('data-form');
+    if (kind === 'setup' || kind === 'byt') {
+      var p1 = pwField('pw1'), p2 = pwField('pw2');
+      if (p1.length < 8) { lockErr = 'Lösenordet behöver vara minst 8 tecken.'; flashErr(kind); return; }
+      if (p1 !== p2) { lockErr = 'Lösenorden är inte lika. Skriv dem igen.'; flashErr(kind); return; }
+      busy = true; lockErr = '';
+      setPassword(p1, kind === 'byt' ? state : (legacy() || blank())).then(function () {
+        busy = false; flash = { ok: true, text: kind === 'byt' ? 'Lösenordet är bytt.' : 'Lösenordet är sparat och dina uppgifter är krypterade.' }; render();
+      }, function () { busy = false; lockErr = 'Det gick inte att spara. Kontrollera att webbläsaren tillåter lagring.'; if (kind === 'setup') { state = null; cryptoKey = null; } flashErr(kind); });
+    } else if (kind === 'unlock') {
+      busy = true; lockErr = '';
+      unlock(pwField('pw')).then(function () { busy = false; render(); }, function () { busy = false; lockErr = 'Fel lösenord. Försök igen.'; render(); var el = document.getElementById('pw'); if (el) el.focus(); });
+    }
+  }
+  function flashErr(kind) {
+    if (kind === 'byt') { var el = document.getElementById('byt-fel'); if (el) el.textContent = lockErr; lockErr = ''; } else render();
+  }
 
   function today() {
     var m = /[?&]idag=(\d{4}-\d{2}-\d{2})/.exec(location.search);
@@ -310,7 +383,11 @@
       F.TYPE_ORDER.map(function (ty) { return '<option value="' + ty + '">' + F.TYPES[ty] + '</option>'; }).join('') + '</select></div></div>' +
       '<button class="knapp tyst" data-act="eget">Lägg till eget innehav</button><p id="e-fel" class="fel" role="alert"></p></div>';
 
-    h += '<h3>Dina uppgifter</h3><p class="muted">Belopp, köp och innehav sparas bara i den här webbläsaren och syns inte för någon annan. Exportera en kopia om du vill byta enhet eller ha en reserv.</p>' +
+    h += '<h3>Lösenord</h3><button class="knapp" data-act="las">Lås appen</button>' +
+      '<form data-form="byt" class="panel" style="margin-top:14px"><p><strong>Byt lösenord</strong></p><div class="tva"><div><label for="pw1">Nytt lösenord</label><input id="pw1" type="password" autocomplete="new-password" minlength="8" required></div>' +
+      '<div><label for="pw2">Upprepa</label><input id="pw2" type="password" autocomplete="new-password" minlength="8" required></div></div>' +
+      '<button class="knapp tyst" type="submit">Byt lösenord</button><p id="byt-fel" class="fel" role="alert"></p></form>';
+    h += '<h3>Dina uppgifter</h3><p class="muted">Belopp, köp och innehav sparas krypterade i den här webbläsaren och syns inte för någon annan. Exportera en kopia om du vill byta enhet eller ha en reserv. Kopian är inte krypterad, så förvara den säkert.</p>' +
       (saveFailed ? '<p class="fel">Webbläsaren tillåter inte att uppgifterna sparas. Exportera en kopia innan du stänger sidan.</p>' : '') +
       '<button class="knapp tyst" data-act="export">Exportera kopia</button><label class="knapp tyst" for="imp" style="color:var(--spruce)">Importera kopia</label><input id="imp" type="file" accept="application/json,.json" hidden>';
     if (prices.failed && prices.failed.length) h += '<p class="small muted" style="margin-top:14px">Senaste kurshämtningen misslyckades för: ' + esc(prices.failed.join(', ')) + '. Ange kurs för hand för dessa.</p>';
@@ -319,6 +396,13 @@
 
   /* ---------- Gemensamt ---------- */
   function render() {
+    document.body.classList.toggle('last', !state);
+    if (!state) {
+      view.innerHTML = viewLock();
+      document.getElementById('kursinfo').textContent = '';
+      var first = view.querySelector('input[type=password]'); if (first && !lockErr) first.focus();
+      return;
+    }
     var views = { oversikt: viewOversikt, kop: viewKop, rapport: viewRapport, innehav: viewInnehav };
     var msg = flash ? '<p class="' + (flash.ok ? 'klart' : 'notis') + '" role="status">' + esc(flash.text) + '</p>' : '';
     flash = null;
@@ -333,13 +417,20 @@
   function go(t) { tab = t; if (t !== 'kop') draft = null; openPrice = null; confirmDel = null; render(); window.scrollTo(0, 0); }
 
   document.querySelector('.tabs').addEventListener('click', function (e) {
-    var b = e.target.closest('button[data-tab]'); if (b) go(b.getAttribute('data-tab'));
+    var b = e.target.closest('button[data-tab]'); if (b && state) go(b.getAttribute('data-tab'));
   });
 
   view.addEventListener('click', function (e) {
     var g = e.target.closest('[data-go]'); if (g) { go(g.getAttribute('data-go')); return; }
     var a = e.target.closest('[data-act]'); if (!a) return;
     var act = a.getAttribute('data-act'), id = a.getAttribute('data-id');
+    if (act === 'radera') {
+      if (!wipeAsk) { wipeAsk = true; render(); return; }
+      try { localStorage.removeItem(KEY2); localStorage.removeItem(KEY); } catch (err) {}
+      wipeAsk = false; lockErr = ''; render(); return;
+    }
+    if (act === 'las') { saveChain.then(lock); return; }
+    if (!state) return;
     if (act === 'registrera') register();
     else if (act === 'mal') { setPctFromTargets(draft); render(); }
     else if (act === 'styr') {
@@ -386,8 +477,11 @@
     }
   });
 
+  view.addEventListener('submit', onSubmit);
+
   view.addEventListener('input', function (e) {
     var el = e.target;
+    if (!state) return;
     if (el.id === 'k-belopp') { draft.amount = el.value; refreshBuy(); }
     else if (el.hasAttribute('data-pct')) { draft.pct[el.getAttribute('data-pct')] = el.value; refreshBuy(); }
     else if (el.hasAttribute('data-price')) { draft.price[el.getAttribute('data-price')] = el.value; }
@@ -400,6 +494,7 @@
   });
   view.addEventListener('change', function (e) {
     var el = e.target;
+    if (!state) return;
     if (el.id === 'k-datum') { draft.date = el.value; prefillPrices(draft); render(); }
     else if (el.id === 'r-period') { repIdx = +el.value; render(); }
     else if (el.id === 'i-dag') { state.settings.buyDay = Math.min(28, Math.max(1, Math.round(num(el.value)) || 25)); save(); render(); }
@@ -419,5 +514,5 @@
   Promise.all([
     getJson('data/prices.json').then(function (p) { if (p && p.series) prices = p; }).catch(function () {}),
     getJson('data/catalog.json').then(function (c) { if (Array.isArray(c)) catalog = c; }).catch(function () {})
-  ]).then(function () { if (!draft) render(); });
+  ]).then(function () { if (state && !draft) render(); });
 })();
