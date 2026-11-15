@@ -130,5 +130,7 @@ assert.equal(F.TYPE_ORDER.length, 4);
   // ett manuellt köp på spardagen ersätter det automatiska
   st.plan.alloc = { r: 75, a: 25 }; st.purchases = [{ id: 'm', date: '2027-01-25', lines: [{ hid: 'r', amount: 1, price: 1, units: 1 }] }];
   assert.deepEqual(F.planDue(st, pr, '2027-01-27').purchases, []);
+  // ett engångsköp på spardagen ersätter inte månadssparandet
+  st.purchases[0].once = true; assert.equal(F.planDue(st, pr, '2027-01-27').purchases.length, 1);
 }
 console.log('Alla tester gick igenom');

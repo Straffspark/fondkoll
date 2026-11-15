@@ -9,7 +9,7 @@
   var prices = { updated: null, series: {} };
   var catalog = [];
   var tab = 'oversikt';
-  var pd = null, pricesLoaded = false, manualOpen = false;
+  var pd = null, pricesLoaded = false, manualOpen = false, one = null;
   var search = { term: '', rows: null, busy: false, err: '' }, msBusy = false, msTried = {}, shown = null;
   var draft = null, repIdx = 0, flash = null, openPrice = null, confirmDel = null;
 
@@ -394,11 +394,57 @@
     save();
     if (!flash) flash = { ok: true, text: due.purchases.length === 1 ? 'Månadssparandet den ' + fd(due.purchases[0].date) + ' är registrerat: ' + kr(state.settings.monthlyAmount) + '.' : due.purchases.length + ' månadsköp är registrerade enligt ditt månadssparande.' };
   }
-  function viewKop() { return viewPlan() + (state.holdings.length ? viewManual() : ''); }
+  function viewKop() { return viewPlan() + viewOnce() + (state.holdings.length ? viewManual() : ''); }
+
+  /* ---------- Engångsköp i en enskild fond eller aktie ---------- */
+  function onceItem(id) { return holding(id) || catalog.filter(function (c) { return c.id === id; })[0] || null; }
+  function oncePrefill() {
+    var p = one.hid && /^\d{4}-\d{2}-\d{2}$/.test(one.date) ? F.priceOn(state, prices, one.hid, one.date) : null;
+    one.src = p && F.daysBetween(p.date, one.date) <= 7 ? p : null;
+    one.price = one.src ? one.src.price : '';
+  }
+  function viewOnce() {
+    if (!one) { one = { hid: '', amount: '', date: today(), price: '', src: null }; }
+    var have = {}; state.holdings.forEach(function (x) { have[x.id] = 1; });
+    var h = '<h3 id="engang" style="margin-top:36px">Engångsköp</h3><p class="muted">Ett enstaka köp i en fond eller aktie, utöver månadssparandet.</p>' +
+      '<label for="o-vad">Fond eller aktie</label><select id="o-vad"><option value="">Välj …</option>';
+    if (state.holdings.length) h += '<optgroup label="Dina innehav">' + state.holdings.map(function (ho) { return '<option value="' + esc(ho.id) + '"' + (one.hid === ho.id ? ' selected' : '') + '>' + esc(ho.name) + '</option>'; }).join('') + '</optgroup>';
+    F.TYPE_ORDER.forEach(function (ty) {
+      var items = catalog.filter(function (c) { return c.type === ty && !have[c.id]; });
+      if (items.length) h += '<optgroup label="Fler ' + F.TYPES[ty].toLowerCase() + '">' + items.map(function (c) { return '<option value="' + esc(c.id) + '"' + (one.hid === c.id ? ' selected' : '') + '>' + esc(c.name) + '</option>'; }).join('') + '</optgroup>';
+    });
+    h += '</select><p class="small muted" style="margin-top:8px">Finns den inte här? <button class="lank" data-go="innehav">Sök bland alla fonder och aktier under Innehav</button></p>' +
+      '<div class="tva"><div><label for="o-belopp">Belopp, kr</label><input id="o-belopp" type="number" inputmode="decimal" min="0" step="100" value="' + esc(one.amount) + '"></div>' +
+      '<div><label for="o-datum">Köpdatum</label><input id="o-datum" type="date" max="' + today() + '" value="' + esc(one.date) + '"></div></div>' +
+      '<label for="o-kurs">Kurs, kr</label><input id="o-kurs" type="number" inputmode="decimal" min="0" step="0.01" value="' + esc(one.price) + '">' +
+      '<p class="small muted" style="margin-top:6px">' + (!one.hid ? 'Kursen fylls i när du har valt fond eller aktie.' : one.src ? 'Kursen är från ' + fd(one.src.date, true) + ' (' + one.src.source + '). Ändra om du handlade till en annan kurs.' : 'Ingen kurs finns för dagen. Ange den kurs du handlade till.') + '</p>' +
+      '<p id="o-andelar" class="small"></p><p id="o-fel" class="fel" role="alert"></p><button class="knapp" data-act="engangskop">Registrera engångsköp</button>';
+    return h;
+  }
+  function refreshOnce() {
+    var el = document.getElementById('o-andelar'); if (!el || !one) return;
+    var a = num(one.amount), p = num(one.price);
+    el.textContent = a > 0 && p > 0 ? 'Motsvarar ' + (a / p).toLocaleString('sv-SE', { maximumFractionDigits: 4 }) + ' andelar.' : '';
+  }
+  function registerOnce() {
+    var err = document.getElementById('o-fel'), it = onceItem(one.hid), a = num(one.amount), p = num(one.price);
+    if (!it) { err.textContent = 'Välj vilken fond eller aktie köpet gäller.'; return; }
+    if (!(a > 0)) { err.textContent = 'Ange ett belopp större än noll.'; return; }
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(one.date)) { err.textContent = 'Välj ett köpdatum.'; return; }
+    if (one.date > today()) { err.textContent = 'Köpdatumet ligger i framtiden. Registrera köpet när det är gjort.'; return; }
+    if (!(p > 0)) { err.textContent = 'Ange kursen du handlade till. Den står i bankens app eller på avräkningsnotan.'; return; }
+    if (!holding(it.id)) state.holdings.push({ id: it.id, name: it.name, type: it.type, target: 0 });
+    var auto = F.priceOn({ manualPrices: {} }, prices, it.id, one.date);
+    if (!auto || auto.date !== one.date || Math.abs(auto.price - p) > 1e-9) { state.manualPrices[it.id] = state.manualPrices[it.id] || {}; state.manualPrices[it.id][one.date] = p; }
+    state.purchases.push({ id: Date.now().toString(36), date: one.date, once: true, lines: [{ hid: it.id, amount: Math.round(a * 100) / 100, price: p, units: a / p }] });
+    save();
+    flash = { ok: true, text: 'Engångsköpet i ' + it.name + ' på ' + kr(a) + ' den ' + fd(one.date) + ' är registrerat.' };
+    one = null; draft = null; render(); window.scrollTo(0, 0);
+  }
 
   function viewManual() {
     if (!draft) draft = newDraft();
-    var h = '<details class="hand"' + (manualOpen ? ' open' : '') + '><summary>Registrera ett köp för hand</summary><p class="muted">För engångsköp, eller om du inte vill ha automatisk registrering. Kursen används för att räkna ut antal andelar.</p>';
+    var h = '<details class="hand"' + (manualOpen ? ' open' : '') + '><summary>Registrera ett månadsköp för hand</summary><p class="muted">För ett köp fördelat på flera innehav, om du inte vill ha automatisk registrering. Kursen används för att räkna ut antal andelar.</p>';
     h += '<div class="tva"><div><label for="k-belopp">Belopp, kr</label><input id="k-belopp" type="number" inputmode="decimal" min="0" step="100" value="' + esc(draft.amount) + '"></div>' +
       '<div><label for="k-datum">Köpdatum</label><input id="k-datum" type="date" value="' + esc(draft.date) + '"></div></div>';
     state.holdings.forEach(function (ho) {
@@ -419,7 +465,7 @@
     if (!state.purchases.length) h += '<p class="muted">Inga köp registrerade än. Din första insättning registreras på samma sätt som ett månadsköp.</p>';
     state.purchases.slice().sort(function (a, b) { return a.date < b.date ? 1 : -1; }).forEach(function (p) {
       var tot = p.lines.reduce(function (s, l) { return s + (p.opening && l.value != null ? l.value : l.amount); }, 0);
-      h += '<div class="innehav-rad"><div class="namn">' + fd(p.date) + ' · ' + (p.opening ? 'Ingående innehav, värde ' : '') + kr(tot) + (p.auto ? ' <span class="small muted">månadssparande</span>' : '') + '</div><div class="small muted">' +
+      h += '<div class="innehav-rad"><div class="namn">' + fd(p.date) + ' · ' + (p.opening ? 'Ingående innehav, värde ' : '') + kr(tot) + (p.auto ? ' <span class="small muted">månadssparande</span>' : p.once ? ' <span class="small muted">engångsköp</span>' : '') + '</div><div class="small muted">' +
         p.lines.map(function (l) { var ho = holding(l.hid); return esc(ho ? ho.name : l.hid) + ' ' + kr(p.opening && l.value != null ? l.value : l.amount); }).join(', ') + '</div>' +
         '<div class="rad2"><button class="lank" data-act="tabortkop" data-id="' + esc(p.id) + '">' + (confirmDel === 'p' + p.id ? 'Bekräfta: ta bort köpet' : 'Ta bort') + '</button></div></div>';
     });
@@ -537,6 +583,7 @@
         '<span><label style="display:inline;margin:0" for="m-' + esc(r.id) + '">Mål %</label> <input id="m-' + esc(r.id) + '" type="number" inputmode="decimal" min="0" max="100" step="1" data-target="' + esc(r.id) + '" value="' + esc(r.target) + '"></span>' +
         '<span>' + (r.price != null ? 'Kurs ' + fmtPrice(r.price) + ' (' + fd(r.priceDate, true) + ', ' + r.source + ')' : 'Ingen kurs än') + '</span>' +
         (r.units ? '<span>Värde ' + kr(r.value) + '</span>' : '') + '</div><div class="rad2">' +
+        '<button class="lank" data-act="kopen" data-id="' + esc(r.id) + '">Engångsköp</button>' +
         '<button class="lank" data-act="kurs" data-id="' + esc(r.id) + '">Ange kurs</button>' +
         (used ? '<span>Har köp. Sätt mål 0 % för att sluta köpa.</span>' : '<button class="lank" data-act="tabort" data-id="' + esc(r.id) + '">Ta bort</button>') + '</div>';
       if (openPrice === r.id) {
@@ -599,11 +646,11 @@
     Array.prototype.forEach.call(document.querySelectorAll('.tabs button'), function (b) {
       if (b.getAttribute('data-tab') === tab) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current');
     });
-    refreshBuy(); refreshPlan(); refreshMs();
+    refreshBuy(); refreshPlan(); refreshOnce(); refreshMs();
     var info = document.getElementById('kursinfo');
     info.textContent = prices.updated ? 'Kurser hämtade ' + fd(prices.updated.slice(0, 10)) : 'Inga automatiska kurser än';
   }
-  function go(t) { tab = t; search = { term: '', rows: null, busy: false, err: '' }; if (t !== 'kop') { draft = null; pd = null; } openPrice = null; confirmDel = null; render(); window.scrollTo(0, 0); }
+  function go(t) { tab = t; search = { term: '', rows: null, busy: false, err: '' }; if (t !== 'kop') { draft = null; pd = null; one = null; } openPrice = null; confirmDel = null; render(); window.scrollTo(0, 0); }
 
   document.querySelector('.tabs').addEventListener('click', function (e) {
     var b = e.target.closest('button[data-tab]'); if (b && state) go(b.getAttribute('data-tab'));
@@ -629,6 +676,11 @@
       pd.alloc[sid] = Object.keys(pd.alloc).length ? '' : 100; render();
     }
     else if (act === 'registrera') register();
+    else if (act === 'engangskop') registerOnce();
+    else if (act === 'kopen') {
+      tab = 'kop'; one = { hid: id, amount: '', date: today(), price: '', src: null }; oncePrefill(); openPrice = null; render();
+      var sec = document.getElementById('engang'); if (sec) sec.scrollIntoView();
+    }
     else if (act === 'mal') { setPctFromTargets(draft); render(); }
     else if (act === 'styr') {
       var amt = num(draft.amount), sug = F.suggestBuy(state, prices, draft.date, amt), acc = 0, lastId = null;
@@ -683,6 +735,7 @@
   view.addEventListener('input', function (e) {
     var el = e.target;
     if (!state) return;
+    if (el.id === 'o-belopp' || el.id === 'o-kurs') { one[el.id === 'o-belopp' ? 'amount' : 'price'] = el.value; var of = document.getElementById('o-fel'); if (of) of.textContent = ''; refreshOnce(); return; }
     if (el.id === 's-belopp' || el.id === 's-dag' || el.hasAttribute('data-spct')) { var sf = document.getElementById('s-fel'); if (sf) sf.textContent = ''; }
     if (el.id === 's-belopp') { pd.amount = el.value; refreshPlan(); }
     else if (el.id === 's-dag') { pd.day = el.value; }
@@ -699,7 +752,9 @@
   view.addEventListener('change', function (e) {
     var el = e.target;
     if (!state) return;
-    if (el.id === 'k-datum') { draft.date = el.value; prefillPrices(draft); render(); }
+    if (el.id === 'o-vad') { one.hid = el.value; oncePrefill(); render(); }
+    else if (el.id === 'o-datum') { one.date = el.value; oncePrefill(); render(); }
+    else if (el.id === 'k-datum') { draft.date = el.value; prefillPrices(draft); render(); }
     else if (el.id === 'r-period') { repIdx = +el.value; render(); }
     else if (el.id === 's-auto') { pd.auto = el.checked; }
     else if (el.id === 'imp' && el.files && el.files[0]) {

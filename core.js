@@ -339,7 +339,7 @@
     if (!ids.length || Math.abs(sum - 100) > 0.5) return { purchases: out, waiting: null };
     var skipped = plan.skipped || [], d = nextBuyDay(plan.since, day), guard = 0;
     while (d <= today && guard++ < 240) {
-      var taken = skipped.indexOf(d) >= 0 || (state.purchases || []).some(function (p) { return p.planDate === d || (!p.opening && p.date === d); });
+      var taken = skipped.indexOf(d) >= 0 || (state.purchases || []).some(function (p) { return p.planDate === d || (!p.opening && !p.once && p.date === d); });
       if (!taken) {
         var lines = [], ok = true;
         for (var i = 0; i < ids.length; i++) {
