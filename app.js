@@ -9,9 +9,10 @@
   var catalog = [];
   var tab = 'oversikt';
   var pd = null, pricesLoaded = false, manualOpen = false;
+  var search = { term: '', rows: null, busy: false, err: '' }, msBusy = false, msTried = {};
   var draft = null, repIdx = 0, flash = null, openPrice = null, confirmDel = null;
 
-  function blank() { return { settings: { monthlyAmount: 0, buyDay: 25 }, holdings: [], purchases: [], manualPrices: {}, plan: null }; }
+  function blank() { return { settings: { monthlyAmount: 0, buyDay: 25 }, holdings: [], purchases: [], manualPrices: {}, plan: null, priceCache: {} }; }
   function normalise(s) {
     var b = blank();
     if (!s || typeof s !== 'object') return b;
@@ -20,6 +21,7 @@
     if (Array.isArray(s.holdings)) b.holdings = s.holdings.filter(function (h) { return h && h.id && h.name && F.TYPES[h.type]; });
     if (Array.isArray(s.purchases)) b.purchases = s.purchases.filter(function (p) { return p && p.date && Array.isArray(p.lines); });
     if (s.manualPrices && typeof s.manualPrices === 'object') b.manualPrices = s.manualPrices;
+    if (s.priceCache && typeof s.priceCache === 'object') b.priceCache = s.priceCache;
     if (s.plan && typeof s.plan === 'object' && s.plan.alloc && typeof s.plan.alloc === 'object') {
       var al = {}; for (var k in s.plan.alloc) { var v = +s.plan.alloc[k]; if (v > 0) al[k] = v; }
       b.plan = { alloc: al, auto: s.plan.auto !== false, since: /^\d{4}-\d{2}-\d{2}$/.test(s.plan.since || '') ? s.plan.since : null, skipped: Array.isArray(s.plan.skipped) ? s.plan.skipped : [] };
@@ -109,6 +111,8 @@
         busy = false; flash = { ok: true, text: kind === 'byt' ? 'Lösenordet är bytt.' : code ? 'Lösenordet är sparat och dina innehav är inlagda.' : 'Lösenordet är sparat och dina uppgifter är krypterade.' }; render();
       }, function (why) {
         if (why === 'kod') { busy = false; lockErr = 'Startkoden stämmer inte. Kontrollera tecknen, eller lämna fältet tomt för att börja utan innehav.'; render(); return; } busy = false; lockErr = 'Det gick inte att spara. Kontrollera att webbläsaren tillåter lagring.'; if (kind === 'setup') { state = null; cryptoKey = null; } flashErr(kind); });
+    } else if (kind === 'sok') {
+      doSearch();
     } else if (kind === 'startkod') {
       var fel = document.getElementById('kod-fel'), c = pwField('kod2').trim();
       if (!c) { fel.textContent = 'Skriv in startkoden.'; return; }
@@ -117,7 +121,7 @@
         function () { busy = false; fel.textContent = 'Startkoden stämmer inte. Kontrollera tecknen och försök igen.'; });
     } else if (kind === 'unlock') {
       busy = true; lockErr = '';
-      unlock(pwField('pw')).then(function () { busy = false; render(); }, function () { busy = false; lockErr = 'Fel lösenord. Försök igen.'; render(); var el = document.getElementById('pw'); if (el) el.focus(); });
+      unlock(pwField('pw')).then(function () { busy = false; render(); refreshMs(); }, function () { busy = false; lockErr = 'Fel lösenord. Försök igen.'; render(); var el = document.getElementById('pw'); if (el) el.focus(); });
     }
   }
   function flashErr(kind) {
@@ -245,6 +249,83 @@
   }
   function pctSum() { var s = 0; state.holdings.forEach(function (h) { s += num(draft.pct[h.id]); }); return s; }
 
+  /* ---------- Sök och kurser för valfria fonder och aktier ---------- */
+  var MS = 'https://lt.morningstar.com/api/rest.svc/', MSTOK = '9vehuxllxs';
+  function msType(row) {
+    if (row.Universe !== 'FOSWE$$ALL') return 'aktie';
+    var g = row.GlobalAssetClassId || '';
+    return /FXINC|MMKT|CASH/.test(g) ? 'ranta' : /ALLOC/.test(g) ? 'blandfond' : 'aktiefond';
+  }
+  function msSearch(term) {
+    var url = MS + MSTOK + '/security/screener?page=1&pageSize=12&sortOrder=LegalName%20asc&outputType=json&version=1&languageId=sv-SE&currencyId=SEK' +
+      '&universeIds=' + encodeURIComponent('FOSWE$$ALL|E0EXG$XSTO') + '&securityDataPoints=' + encodeURIComponent('SecId|Name|ISIN|Ticker|ClosePrice|PriceCurrency|CategoryName|GlobalAssetClassId|Universe') +
+      '&term=' + encodeURIComponent(term);
+    return fetch(url).then(function (r) { if (!r.ok) throw new Error(r.status); return r.json(); }).then(function (j) { return (j.rows || []).filter(function (x) { return x.SecId && x.Name; }); });
+  }
+  function msSeries(h) {
+    var d = new Date(Date.now() - 730 * 86400000).toISOString().slice(0, 10);
+    var id = h.ms.id + (h.ms.stock ? ']3]0]E0WWE$$ALL' : ']2]0]FOSWE$$ALL');
+    return fetch(MS + 'timeseries_price/' + MSTOK + '?currencyId=SEK&idtype=Morningstar&frequency=daily&outputType=COMPACTJSON&startDate=' + d + '&id=' + encodeURIComponent(id))
+      .then(function (r) { if (!r.ok) throw new Error(r.status); return r.json(); })
+      .then(function (a) {
+        if (!Array.isArray(a) || !a.length) throw new Error('inga kurser');
+        return a.filter(function (p) { return p && p[1] > 0; }).map(function (p) { return [new Date(p[0] + 43200000).toISOString().slice(0, 10), Math.round(p[1] * 10000) / 10000]; });
+      });
+  }
+  function mergeCache() {
+    if (!state) return;
+    prices.series = prices.series || {};
+    state.holdings.forEach(function (h) {
+      var c = h.ms && state.priceCache[h.id];
+      if (c && c.points && c.points.length) prices.series[h.id] = { source: 'morningstar', currency: 'SEK', points: c.points };
+    });
+  }
+  /* Hämtar kurser för egna tillägg. Görs vid upplåsning och när det gått mer än sex timmar. */
+  function refreshMs(force) {
+    if (!state || msBusy) return Promise.resolve();
+    var todo = state.holdings.filter(function (h) { var c = state.priceCache[h.id]; return h.ms && !(Date.now() - (msTried[h.id] || 0) < 600000) && (force || !c || !(Date.now() - c.fetched < 6 * 3600000)); });
+    todo.forEach(function (h) { msTried[h.id] = Date.now(); });
+    mergeCache();
+    if (!todo.length) return Promise.resolve();
+    msBusy = true;
+    return Promise.all(todo.map(function (h) {
+      return msSeries(h).then(function (pts) { if (state && holding(h.id)) state.priceCache[h.id] = { fetched: Date.now(), points: pts }; }, function () {});
+    })).then(function () { msBusy = false; if (!state) return; mergeCache(); save(); if (!draft && !pd && !search.busy) render(); else autoBuy(); });
+  }
+  function searchResults() {
+    if (search.busy) return '<p class="muted">Söker …</p>';
+    if (search.err) return '<p class="fel" role="alert">' + esc(search.err) + '</p>';
+    if (!search.rows) return '';
+    if (!search.rows.length) return '<p class="muted">Inga träffar på ”' + esc(search.term) + '”. Prova en del av namnet eller ISIN-numret.</p>';
+    var h = '';
+    search.rows.forEach(function (r, i) {
+      var ty = msType(r), held = state.holdings.some(function (x) { return x.id === 'ms-' + r.SecId || (r.ISIN && x.isin === r.ISIN); }) || catalog.some(function (c) { return r.ISIN && c.isin === r.ISIN && holding(c.id); });
+      h += '<div class="innehav-rad"><div class="namn">' + esc(r.Name) + '</div><div class="rad2"><span>' + F.TYPES[ty].replace(/(er|r)$/, '') +
+        (r.Ticker ? ' · ' + esc(r.Ticker) : r.CategoryName ? ' · ' + esc(r.CategoryName) : '') + '</span>' +
+        (r.ClosePrice ? '<span>' + fmtPrice(+r.ClosePrice) + ' ' + esc(r.PriceCurrency || '') + '</span>' : '') +
+        (held ? '<span>Finns redan bland dina innehav</span>' : '<button class="knapp liten" data-act="msadd" data-id="' + i + '">Lägg till</button>') + '</div></div>';
+    });
+    return h + '<p class="small muted">Visar högst tolv träffar. Skriv mer av namnet för att snäva in. Fonder med kurs i annan valuta räknas om till kronor.</p>';
+  }
+  function doSearch() {
+    var term = (document.getElementById('q') || {}).value || '';
+    term = term.trim();
+    if (term.length < 2) { search = { term: term, rows: null, busy: false, err: 'Skriv minst två tecken.' }; render(); return; }
+    search = { term: term, rows: null, busy: true, err: '' }; render();
+    msSearch(term).then(function (rows) { search = { term: term, rows: rows, busy: false, err: '' }; render(); },
+      function () { search = { term: term, rows: null, busy: false, err: 'Sökningen gick inte att nå just nu. Kontrollera uppkopplingen och försök igen.' }; render(); });
+  }
+  function addFromSearch(i) {
+    var r = search.rows && search.rows[i]; if (!r) return;
+    var c = r.ISIN ? catalog.filter(function (x) { return x.isin === r.ISIN; })[0] : null, h;
+    if (c && !holding(c.id)) h = { id: c.id, name: c.name, type: c.type, target: 0 };
+    else if (!holding('ms-' + r.SecId)) h = { id: 'ms-' + r.SecId, name: r.Name, type: msType(r), target: 0, isin: r.ISIN || null, ms: { id: r.SecId, stock: r.Universe !== 'FOSWE$$ALL' } };
+    if (!h) return;
+    state.holdings.push(h); save(); draft = null;
+    flash = { ok: true, text: h.name + ' är tillagd. Kurserna hämtas automatiskt.' }; render();
+    refreshMs();
+  }
+
   /* ---------- Månadssparande ---------- */
   function newPlanDraft() {
     var al = {}; if (state.plan) for (var k in state.plan.alloc) if (holding(k)) al[k] = state.plan.alloc[k];
@@ -278,7 +359,7 @@
       var items = catalog.filter(function (c) { return c.type === ty && !have[c.id]; });
       if (items.length) h += '<optgroup label="Fler ' + F.TYPES[ty].toLowerCase() + '">' + items.map(function (c) { return '<option value="' + esc(c.id) + '">' + esc(c.name) + '</option>'; }).join('') + '</optgroup>';
     });
-    h += '</select><button class="knapp tyst" data-act="splanadd">Lägg till</button>' +
+    h += '</select><button class="knapp tyst" data-act="splanadd">Lägg till</button><p class="small muted" style="margin-top:8px">Finns den inte här? <button class="lank" data-go="innehav">Sök bland alla fonder och aktier under Innehav</button></p>' +
       '<p id="s-summa" class="small" style="margin-top:14px"></p>' +
       '<label class="kryss" for="s-auto"><input id="s-auto" type="checkbox"' + (pd.auto ? ' checked' : '') + '> Registrera köpen automatiskt på spardagen, till dagens kurs</label>' +
       '<p id="s-fel" class="fel" role="alert"></p><button class="knapp" data-act="sparaplan">Spara månadssparande</button>';
@@ -470,15 +551,17 @@
     }
 
     var have = {}; state.holdings.forEach(function (x) { have[x.id] = 1; });
-    h += '<h3>Lägg till</h3><label for="a-kat">Fonder och aktier med automatiska kurser</label><select id="a-kat"><option value="">Välj …</option>';
+    h += '<h3>Lägg till fond eller aktie</h3><form data-form="sok"><label for="q">Sök på namn, kortnamn eller ISIN</label><input id="q" type="text" inputmode="search" autocomplete="off" spellcheck="false" value="' + esc(search.term) + '" placeholder="t.ex. Handelsbanken Global eller INVE B">' +
+      '<button class="knapp" type="submit">Sök</button></form><p class="small muted">Söker bland fonder som säljs i Sverige och aktier på Stockholmsbörsen.</p><div id="sokres">' + searchResults() + '</div>';
+    h += '<label for="a-kat" style="margin-top:22px">Eller välj ur den färdiga listan</label><select id="a-kat"><option value="">Välj …</option>';
     F.TYPE_ORDER.forEach(function (ty) {
       var items = catalog.filter(function (c) { return c.type === ty && !have[c.id]; });
       if (!items.length) return;
       h += '<optgroup label="' + F.TYPES[ty] + '">' + items.map(function (c) { return '<option value="' + esc(c.id) + '">' + esc(c.name) + '</option>'; }).join('') + '</optgroup>';
     });
-    h += '</select><button class="knapp" data-act="laggtill">Lägg till</button>';
+    h += '</select><button class="knapp tyst" data-act="laggtill">Lägg till</button>';
     if (!catalog.length) h += '<p class="small muted">Listan kunde inte läsas in just nu. Du kan lägga till egna innehav nedan.</p>';
-    h += '<div class="panel" style="margin-top:18px"><p><strong>Saknas något i listan?</strong> Lägg in det själv. Kursen anger du då för hand.</p>' +
+    h += '<div class="panel" style="margin-top:18px"><p><strong>Hittar du det inte?</strong> Lägg in det själv, till exempel utländska aktier. Kursen anger du då för hand.</p>' +
       '<div class="tva"><div><label for="e-namn">Namn</label><input id="e-namn" type="text" maxlength="60"></div><div><label for="e-typ">Tillgångsslag</label><select id="e-typ">' +
       F.TYPE_ORDER.map(function (ty) { return '<option value="' + ty + '">' + F.TYPES[ty] + '</option>'; }).join('') + '</select></div></div>' +
       '<button class="knapp tyst" data-act="eget">Lägg till eget innehav</button><p id="e-fel" class="fel" role="alert"></p></div>';
@@ -514,11 +597,11 @@
     Array.prototype.forEach.call(document.querySelectorAll('.tabs button'), function (b) {
       if (b.getAttribute('data-tab') === tab) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current');
     });
-    refreshBuy(); refreshPlan();
+    refreshBuy(); refreshPlan(); refreshMs();
     var info = document.getElementById('kursinfo');
     info.textContent = prices.updated ? 'Kurser hämtade ' + fd(prices.updated.slice(0, 10)) : 'Inga automatiska kurser än';
   }
-  function go(t) { tab = t; if (t !== 'kop') { draft = null; pd = null; } openPrice = null; confirmDel = null; render(); window.scrollTo(0, 0); }
+  function go(t) { tab = t; search = { term: '', rows: null, busy: false, err: '' }; if (t !== 'kop') { draft = null; pd = null; } openPrice = null; confirmDel = null; render(); window.scrollTo(0, 0); }
 
   document.querySelector('.tabs').addEventListener('click', function (e) {
     var b = e.target.closest('button[data-tab]'); if (b && state) go(b.getAttribute('data-tab'));
@@ -535,7 +618,8 @@
     }
     if (act === 'las') { saveChain.then(lock); return; }
     if (!state) return;
-    if (act === 'sparaplan') savePlan();
+    if (act === 'msadd') addFromSearch(+id);
+    else if (act === 'sparaplan') savePlan();
     else if (act === 'splanbort') { delete pd.alloc[id]; render(); }
     else if (act === 'splanadd') {
       var sid = document.getElementById('s-add').value; if (!sid) return;
@@ -570,7 +654,7 @@
       state.manualPrices[id] = state.manualPrices[id] || {}; state.manualPrices[id][d] = p; save();
       openPrice = null; flash = { ok: true, text: 'Kursen är sparad.' }; render();
     }
-    else if (act === 'tabort') { state.holdings = state.holdings.filter(function (h) { return h.id !== id; }); delete state.manualPrices[id]; save(); render(); }
+    else if (act === 'tabort') { state.holdings = state.holdings.filter(function (h) { return h.id !== id; }); delete state.manualPrices[id]; delete state.priceCache[id]; if (prices.series) delete prices.series[id]; save(); render(); }
     else if (act === 'laggtill') {
       var sel = document.getElementById('a-kat').value, c = catalog.filter(function (x) { return x.id === sel; })[0];
       if (!c) return;
@@ -584,7 +668,8 @@
       flash = { ok: true, text: name + ' är tillagd. Ange en målvikt.' }; render();
     }
     else if (act === 'export') {
-      var blob = new Blob([JSON.stringify(state, null, 1)], { type: 'application/json' });
+      var copy = JSON.parse(JSON.stringify(state)); copy.priceCache = {};
+      var blob = new Blob([JSON.stringify(copy, null, 1)], { type: 'application/json' });
       var link = document.createElement('a'); link.href = URL.createObjectURL(blob); link.download = 'fondkoll-' + today() + '.json';
       document.body.appendChild(link); link.click(); link.remove();
     }
@@ -629,7 +714,7 @@
   function getJson(url) { return fetch(url, { cache: 'no-store' }).then(function (r) { if (!r.ok) throw new Error(r.status); return r.json(); }); }
   render();
   Promise.all([
-    getJson('data/prices.json').then(function (p) { if (p && p.series) prices = p; }).catch(function () {}),
+    getJson('data/prices.json').then(function (p) { if (p && p.series) { prices = p; mergeCache(); } }).catch(function () {}),
     getJson('data/catalog.json').then(function (c) { if (Array.isArray(c)) catalog = c; }).catch(function () {})
   ]).then(function () { pricesLoaded = true; if (state && !draft && !pd) render(); else if (state) { autoBuy(); } });
 })();
