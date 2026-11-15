@@ -149,7 +149,7 @@
     var gain = snap.total - snap.invested;
     h += '<dl class="nyckeltal"><div><dt>Värde i dag</dt><dd>' + kr(snap.total) + '</dd></div><div><dt>Insatt</dt><dd>' + kr(snap.invested) +
       '</dd></div><div><dt>Utveckling</dt><dd class="' + cls(gain) + '">' + F.fmtSignedKr(gain) + '</dd></div></dl>' +
-      '<p class="small muted">' + F.fmtPct(snap.invested > 0 ? gain / snap.invested : null, 2) + ' på insatt belopp sedan ' + fd(first) + '.</p>';
+      '<p class="small muted">' + F.fmtPct(snap.invested > 0 ? gain / snap.invested : null, 2) + ' på insatt belopp' + (state.purchases.some(function (x) { return x.opening; }) ? ', räknat från dina ursprungliga köp.' : ' sedan ' + fd(first) + '.') + '</p>';
 
     h += '<h3>Värde över tid</h3>' + chart(F.history(state, prices, first, t));
     h += '<h3>Fördelning mot målet</h3>' + allocation(snap);
